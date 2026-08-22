@@ -1,0 +1,117 @@
+#version 460
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(std430, set = 0, binding = 1) readonly buffer SourceCellBuffer {
+    uint sourceCells[];
+};
+layout(std430, set = 0, binding = 4) buffer ClaimBuffer {
+    uint destinationClaims[];
+};
+
+layout(push_constant) uniform SimulationConstants {
+    float _unusedTime;
+    float _unusedRadius;
+    uint _unusedMaximumSteps;
+    float _unusedEpsilon;
+    uvec2 _unusedRenderResolution;
+    float _unusedCameraDistance;
+    uint voxelResolution;
+    float _unusedCameraYaw;
+    float _unusedCameraPitch;
+    vec2 _unusedBrushNdc;
+    uint _unusedEditMode;
+    uint _unusedBrushMaterial;
+    uint simulationTick;
+    uint _padding;
+} simulation;
+
+uint flattenCell(uvec3 cell, uint resolution) {
+    return cell.x + resolution * (cell.y + resolution * cell.z);
+}
+
+bool insideGrid(ivec3 cell) {
+    return all(greaterThanEqual(cell, ivec3(0))) &&
+           all(lessThan(cell, ivec3(int(simulation.voxelResolution))));
+}
+
+ivec3 gravityStep(ivec3 cell) {
+    vec3 center = vec3(simulation.voxelResolution - 1u) * 0.5;
+    vec3 inward = center - vec3(cell);
+    vec3 magnitude = abs(inward);
+    if (magnitude.x >= magnitude.y && magnitude.x >= magnitude.z) {
+        return ivec3(sign(inward.x), 0, 0);
+    }
+    if (magnitude.y >= magnitude.z) {
+        return ivec3(0, sign(inward.y), 0);
+    }
+    return ivec3(0, 0, sign(inward.z));
+}
+
+ivec3 lateralStep(ivec3 gravity, uint selector) {
+    bool positive = (selector & 1u) == 0u;
+    int direction = positive ? 1 : -1;
+    bool secondAxis = selector >= 2u;
+    if (gravity.x != 0) {
+        return secondAxis ? ivec3(0, 0, direction) : ivec3(0, direction, 0);
+    }
+    if (gravity.y != 0) {
+        return secondAxis ? ivec3(0, 0, direction) : ivec3(direction, 0, 0);
+    }
+    return secondAxis ? ivec3(0, direction, 0) : ivec3(direction, 0, 0);
+}
+
+float gravitationalPotential(ivec3 cell) {
+    vec3 center = vec3(simulation.voxelResolution - 1u) * 0.5;
+    vec3 offset = vec3(cell) - center;
+    return dot(offset, offset);
+}
+
+ivec3 chooseTarget(ivec3 cell, uint sourceIndex) {
+    ivec3 gravity = gravityStep(cell);
+    ivec3 directTarget = cell + gravity;
+    float currentPotential = gravitationalPotential(cell);
+    if (insideGrid(directTarget) &&
+        gravitationalPotential(directTarget) < currentPotential &&
+        (sourceCells[flattenCell(uvec3(directTarget), simulation.voxelResolution)] & 0xffu) == 0u) {
+        return directTarget;
+    }
+
+    ivec3 bestTarget = cell;
+    float bestPotential = currentPotential;
+    uint firstSelector = (sourceIndex ^ (simulation.simulationTick * 747796405u)) & 3u;
+    for (uint offset = 0u; offset < 4u; ++offset) {
+        uint selector = (firstSelector + offset) & 3u;
+        ivec3 diagonalTarget = cell + gravity + lateralStep(gravity, selector);
+        if (!insideGrid(diagonalTarget)) {
+            continue;
+        }
+        float candidatePotential = gravitationalPotential(diagonalTarget);
+        bool destinationIsEmpty =
+            (sourceCells[flattenCell(uvec3(diagonalTarget), simulation.voxelResolution)] & 0xffu) == 0u;
+        if (destinationIsEmpty && candidatePotential < bestPotential) {
+            bestTarget = diagonalTarget;
+            bestPotential = candidatePotential;
+        }
+    }
+    return bestTarget;
+}
+
+void main() {
+    uvec3 unsignedCell = gl_GlobalInvocationID.xyz;
+    if (any(greaterThanEqual(unsignedCell, uvec3(simulation.voxelResolution)))) {
+        return;
+    }
+    ivec3 cell = ivec3(unsignedCell);
+    uint sourceIndex = flattenCell(unsignedCell, simulation.voxelResolution);
+    if ((sourceCells[sourceIndex] & 0xffu) != 2u) {
+        return;
+    }
+
+    ivec3 target = chooseTarget(cell, sourceIndex);
+    if (all(equal(target, cell))) {
+        return;
+    }
+    uint targetIndex = flattenCell(uvec3(target), simulation.voxelResolution);
+    atomicMin(destinationClaims[targetIndex], sourceIndex);
+}

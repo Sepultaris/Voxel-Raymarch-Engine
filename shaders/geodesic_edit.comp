@@ -1,0 +1,528 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#ifndef VOXEL_TILE_LOOKUP_WIDTH
+#define VOXEL_TILE_LOOKUP_WIDTH 512
+#endif
+#ifndef VOXEL_TILE_LOOKUP_HEIGHT
+#define VOXEL_TILE_LOOKUP_HEIGHT 256
+#endif
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+#include "shared/geodesic_tile_query_shared.inc"
+layout(std430, set = 0, binding = 5) readonly buffer GeodesicTileBuffer {
+    GeodesicTile geodesicTiles[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer TileLookupBuffer {
+    uint tileDirectionLookup[];
+};
+layout(std430, set = 0, binding = 7) buffer TileBrickBuffer {
+    uint tileBrickCells[];
+};
+layout(std430, set = 0, binding = 9) buffer GeodesicColumnStateBuffer {
+    uvec4 geodesicColumnStates[];
+};
+layout(std430, set = 0, binding = 10) readonly buffer GeodesicPageTableBuffer {
+    uvec4 geodesicPageTable[];
+};
+#if VOXEL_SCALE_LAB
+layout(std430, set = 0, binding = 15) buffer GeodesicFarFieldBuffer {
+    uint geodesicFarField[];
+};
+layout(std430, set = 0, binding = 16) buffer GeodesicMacroHierarchyBuffer {
+    uvec4 geodesicMacroNodes[];
+};
+#endif
+
+layout(push_constant) uniform FrameConstants {
+    float time;
+    float planetRadius;
+    uint maxMarchSteps;
+    float hitEpsilon;
+    uvec2 resolution;
+    float cameraDistance;
+    uint voxelResolution;
+    float cameraYaw;
+    float cameraPitch;
+    vec2 brushNdc;
+    uint editMode;
+    uint brushMaterial;
+    uint simulationTick;
+    uint visualizationMode;
+    uint surfaceTileCount;
+    uint residentPageCount;
+    float planetOuterScale;
+    uint geodesicTraversalMode;
+    uint streamSamplePhase;
+    uint terrainSeed;
+    float terrainContinentScale;
+    float terrainContinentStrength;
+    float terrainMountainScale;
+    float terrainMountainStrength;
+    float terrainRoughness;
+    float terrainOceanLevel;
+    float terrainPolarStrength;
+    uint cameraMode;
+    float surfaceHeading;
+    float surfaceLookPitch;
+} frame;
+
+const float kFarDistance = 100.0;
+const uint kTileLookupWidth = VOXEL_TILE_LOOKUP_WIDTH;
+const uint kTileLookupHeight = VOXEL_TILE_LOOKUP_HEIGHT;
+const uint kMaximumGeodesicDdaSteps = 2048u;
+const float kPi = 3.14159265358979323846;
+
+uint tileNeighbor(GeodesicTile tile, uint slot) {
+    return geodesicTileNeighbor(tile, slot);
+}
+
+#if VOXEL_SCALE_LAB
+float localHorizonSample(uint neighborHeight, uint surfaceLevel,
+                         float horizontalRunLayers) {
+    float rise = float(neighborHeight > surfaceLevel
+        ? neighborHeight - surfaceLevel : 0u);
+    float run = max(horizontalRunLayers, 0.25);
+    return rise > 0.0 ? rise * inversesqrt(rise * rise + run * run) : 0.0;
+}
+
+void updateLocalAoCue(uint tileIndex) {
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    uint count = clamp(geodesicTileNeighborCount(tile), 5u, 6u);
+    uvec4 state = geodesicColumnStates[tileIndex];
+    float layerHeight = geodesicTileRadialDepth(tile) /
+                        float(geodesicTileLayerCount(tile));
+    float horizontalRunLayers = geodesicTileSurfaceWidth(tile) /
+                                max(layerHeight, 1e-7);
+    float horizon[6];
+    float horizonSum = 0.0;
+    for (uint slot = 0u; slot < count; ++slot) {
+        horizon[slot] = localHorizonSample(
+            geodesicColumnStates[tileNeighbor(tile, slot)].y,
+            state.y, horizontalRunLayers);
+        horizonSum += horizon[slot];
+    }
+    float wedgeSum = 0.0;
+    for (uint slot = 0u; slot < count; ++slot) {
+        wedgeSum += sqrt(horizon[slot] * horizon[(slot + 1u) % count]);
+    }
+    float raw = 0.62 * horizonSum / float(count) +
+                0.38 * wedgeSum / float(count);
+    uint quantized = uint(round(clamp(smoothstep(0.03, 0.85, raw),
+                                      0.0, 1.0) * 255.0));
+    geodesicColumnStates[tileIndex].z =
+        (state.z & ~0xff00u) | (quantized << 8u);
+}
+
+void updateEditedAoRing(uint tileIndex) {
+    memoryBarrierBuffer();
+    updateLocalAoCue(tileIndex);
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+        updateLocalAoCue(tileNeighbor(tile, slot));
+    }
+}
+#endif
+
+uint refineSurfaceTile(uint tileIndex, vec3 direction) {
+    for (uint iteration = 0u; iteration < 32u; ++iteration) {
+        GeodesicTile tile = geodesicTiles[tileIndex];
+        float bestAlignment = dot(direction, tile.center.xyz);
+        uint bestTile = tileIndex;
+        for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+            uint candidate = tileNeighbor(tile, slot);
+            float alignment = dot(direction, geodesicTiles[candidate].center.xyz);
+            if (alignment > bestAlignment) {
+                bestAlignment = alignment;
+                bestTile = candidate;
+            }
+        }
+        if (bestTile == tileIndex) {
+            break;
+        }
+        tileIndex = bestTile;
+    }
+    return tileIndex;
+}
+
+uint findSurfaceTile(vec3 direction) {
+    float longitude = atan(direction.z, direction.x);
+    float latitude = asin(clamp(direction.y, -1.0, 1.0));
+    uint lookupX = min(uint((longitude / (2.0 * kPi) + 0.5) * float(kTileLookupWidth)),
+                       kTileLookupWidth - 1u);
+    uint lookupY = min(uint((0.5 - latitude / kPi) * float(kTileLookupHeight)),
+                       kTileLookupHeight - 1u);
+    return refineSurfaceTile(
+        tileDirectionLookup[lookupX + kTileLookupWidth * lookupY], direction);
+}
+
+bool raySphereInterval(vec3 origin, vec3 direction, float radius,
+                       out float nearDistance, out float farDistance) {
+    float projection = dot(origin, direction);
+    float discriminant = projection * projection - dot(origin, origin) + radius * radius;
+    if (discriminant < 0.0) {
+        return false;
+    }
+    float root = sqrt(discriminant);
+    nearDistance = max(-projection - root, 0.0);
+    farDistance = -projection + root;
+    return farDistance >= nearDistance;
+}
+
+bool clipPlane(vec3 planeNormal, float planeDistance,
+               vec3 rayOrigin, vec3 rayDirection,
+               inout float nearDistance, inout float farDistance) {
+    float originDistance = dot(planeNormal, rayOrigin) - planeDistance;
+    float denominator = dot(planeNormal, rayDirection);
+    if (denominator == 0.0) {
+        return originDistance <= 0.0;
+    }
+    float nearSide = fma(denominator, nearDistance, originDistance);
+    float farSide = fma(denominator, farDistance, originDistance);
+    if (nearSide <= 0.0 && farSide <= 0.0) {
+        return true;
+    }
+    if (nearSide > 0.0 && farSide > 0.0) {
+        return false;
+    }
+    float distance = -originDistance / denominator;
+    if (isnan(distance) || isinf(distance)) {
+        return false;
+    }
+    distance = clamp(distance, nearDistance, farDistance);
+    if (nearSide > 0.0) {
+        nearDistance = distance;
+    } else {
+        farDistance = distance;
+    }
+    return nearDistance <= uintBitsToFloat(floatBitsToUint(farDistance) + 1u);
+}
+
+bool intersectColumn(uint tileIndex, float innerHeight, float outerHeight,
+                     vec3 rayOrigin, vec3 rayDirection, out float hitDistance) {
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    float nearDistance = 0.0;
+    float farDistance = kFarDistance;
+    if (!clipPlane(tile.center.xyz, outerHeight, rayOrigin, rayDirection,
+                   nearDistance, farDistance) ||
+        !clipPlane(-tile.center.xyz, -innerHeight, rayOrigin, rayDirection,
+                   nearDistance, farDistance)) {
+        return false;
+    }
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+        vec3 neighborCenter = geodesicTiles[tileNeighbor(tile, slot)].center.xyz;
+        vec3 inwardPlane = tile.center.xyz - neighborCenter;
+        float planeLength = length(inwardPlane);
+        if (!clipPlane(-inwardPlane, frame.planetRadius * 2e-6 * planeLength,
+                       rayOrigin, rayDirection, nearDistance, farDistance)) {
+            return false;
+        }
+    }
+    hitDistance = nearDistance;
+    return hitDistance >= 0.0 && hitDistance < kFarDistance;
+}
+
+void considerColumn(uint tileIndex, vec3 rayOrigin, vec3 rayDirection,
+                    inout float closestDistance, inout uint closestTile,
+                    inout int closestTopLayer) {
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    uvec4 columnState = geodesicColumnStates[tileIndex];
+    if (columnState.y == 0u) {
+        return;
+    }
+    int highestFilledLayer = int(columnState.y - 1u);
+    float totalDepth = geodesicTileRadialDepth(tile) * frame.planetRadius;
+    float layerThickness = totalDepth / float(geodesicTileLayerCount(tile));
+    float columnBase = frame.planetRadius - totalDepth;
+    float outerHeight = columnBase + float(highestFilledLayer + 1) * layerThickness;
+    float hitDistance = 0.0;
+    if (intersectColumn(tileIndex, columnBase, outerHeight,
+                        rayOrigin, rayDirection, hitDistance) &&
+        hitDistance < closestDistance) {
+        closestDistance = hitDistance;
+        closestTile = tileIndex;
+        closestTopLayer = highestFilledLayer;
+    }
+}
+
+float nextTravelUlp(float travel) {
+    return uintBitsToFloat(floatBitsToUint(travel) + 1u);
+}
+
+bool eventDistanceTied(float first, float second) {
+    if (first == second) {
+        return true;
+    }
+    uint firstBits = floatBitsToUint(first);
+    uint secondBits = floatBitsToUint(second);
+    return max(firstBits, secondBits) - min(firstBits, secondBits) <= 4u;
+}
+
+bool tileOwnsAtTravel(uint tileIndex, vec3 rayOrigin,
+                      vec3 rayDirection, float travel) {
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+        uint adjacent = tileNeighbor(tile, slot);
+        vec3 plane = tile.center.xyz - geodesicTiles[adjacent].center.xyz;
+        float signedDistance = dot(plane, rayOrigin) +
+            dot(plane, rayDirection) * travel;
+        if (signedDistance < 0.0 ||
+            (signedDistance == 0.0 && tileIndex > adjacent)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool tileOwnsAfterEvent(uint tileIndex, vec3 rayOrigin,
+                        vec3 rayDirection, float eventDistance) {
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    float probeDistance = eventDistance;
+    for (uint ulp = 0u; ulp < 4u; ++ulp) {
+        probeDistance = nextTravelUlp(probeDistance);
+    }
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+        uint adjacent = tileNeighbor(tile, slot);
+        vec3 plane = tile.center.xyz - geodesicTiles[adjacent].center.xyz;
+        float originDistance = dot(plane, rayOrigin);
+        float derivative = dot(plane, rayDirection);
+        float signedDistance = fma(derivative, probeDistance, originDistance);
+        if (signedDistance < 0.0 ||
+            (signedDistance == 0.0 &&
+             (derivative < 0.0 ||
+              (derivative == 0.0 && tileIndex > adjacent)))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+uint canonicalSeedOwner(uint seedTile, vec3 rayOrigin,
+                        vec3 rayDirection, float travel) {
+    uint canonical = tileOwnsAtTravel(
+        seedTile, rayOrigin, rayDirection, travel)
+        ? seedTile : 0xffffffffu;
+    GeodesicTile seed = geodesicTiles[seedTile];
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(seed); ++slot) {
+        uint candidate = tileNeighbor(seed, slot);
+        if (tileOwnsAtTravel(candidate, rayOrigin, rayDirection, travel) &&
+            (canonical == 0xffffffffu || candidate < canonical)) {
+            canonical = candidate;
+        }
+    }
+    return canonical == 0xffffffffu ? seedTile : canonical;
+}
+
+void buildCameraFrame(out vec3 cameraPosition, out vec3 forward,
+                      out vec3 right, out vec3 up) {
+    float yaw = frame.cameraYaw + (frame.cameraMode == 0u ? frame.time : 0.0);
+    float cosinePitch = cos(frame.cameraPitch);
+    vec3 radial = normalize(vec3(sin(yaw) * cosinePitch,
+                                 sin(frame.cameraPitch),
+                                 cos(yaw) * cosinePitch));
+    cameraPosition = radial * frame.cameraDistance;
+    if (frame.cameraMode == 0u) {
+        forward = -radial;
+        right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+        up = cross(right, forward);
+        return;
+    }
+    vec3 reference = abs(radial.y) < 0.95
+                         ? vec3(0.0, 1.0, 0.0)
+                         : vec3(0.0, 0.0, 1.0);
+    vec3 tangentRight = normalize(cross(reference, radial));
+    vec3 tangentForward = normalize(cross(radial, tangentRight));
+    vec3 horizontalForward = normalize(
+        tangentForward * cos(frame.surfaceHeading) +
+        tangentRight * sin(frame.surfaceHeading));
+    forward = normalize(horizontalForward * cos(frame.surfaceLookPitch) +
+                        radial * sin(frame.surfaceLookPitch));
+    right = normalize(cross(forward, radial));
+    up = normalize(cross(right, forward));
+}
+
+void main() {
+    if (frame.editMode == 0u) {
+        return;
+    }
+
+    vec3 cameraPosition;
+    vec3 forward;
+    vec3 right;
+    vec3 up;
+    buildCameraFrame(cameraPosition, forward, right, up);
+    vec2 screen = frame.brushNdc;
+    screen.y = -screen.y;
+    screen.x *= float(frame.resolution.x) / float(frame.resolution.y);
+    vec3 rayDirection = normalize(forward + screen.x * right + screen.y * up);
+
+    float travel = 0.0;
+    float farDistance = 0.0;
+    if (!raySphereInterval(cameraPosition, rayDirection,
+                           frame.planetRadius * frame.planetOuterScale,
+                           travel, farDistance)) {
+        return;
+    }
+
+    float closestDistance = kFarDistance;
+    uint closestTile = 0xffffffffu;
+    int closestTopLayer = -1;
+    float seededTravel = nextTravelUlp(travel);
+    vec3 entryPosition = cameraPosition + rayDirection * seededTravel;
+    uint tileIndex = canonicalSeedOwner(
+        findSurfaceTile(normalize(entryPosition)),
+        cameraPosition, rayDirection, seededTravel);
+    float previousEventDistance = travel;
+    bool hasPreviousEvent = false;
+
+    for (uint step = 0u; step < kMaximumGeodesicDdaSteps && travel <= farDistance; ++step) {
+        considerColumn(tileIndex, cameraPosition, rayDirection,
+                       closestDistance, closestTile, closestTopLayer);
+
+        GeodesicTile tile = geodesicTiles[tileIndex];
+        float eventDistance = farDistance;
+        bool hasSideEvent = false;
+        uint tiedOwners[6];
+        uint tiedCount = 0u;
+        for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+            uint adjacent = tileNeighbor(tile, slot);
+            vec3 plane = tile.center.xyz - geodesicTiles[adjacent].center.xyz;
+            float denominator = dot(plane, rayDirection);
+            float originDistance = dot(plane, cameraPosition);
+            float geometricOverlap = frame.planetRadius * 2e-6;
+            float intervalDistance = originDistance + denominator * travel;
+            if (intervalDistance * intervalDistance <=
+                geometricOverlap * geometricOverlap * dot(plane, plane)) {
+                considerColumn(adjacent, cameraPosition, rayDirection,
+                               closestDistance, closestTile, closestTopLayer);
+            }
+            if (denominator == 0.0 || denominator > 0.0) {
+                continue;
+            }
+            float crossing = -originDistance / denominator;
+            if (isnan(crossing) || isinf(crossing) ||
+                crossing <= travel || crossing > farDistance) {
+                continue;
+            }
+            if (!hasSideEvent ||
+                (crossing < eventDistance &&
+                 !eventDistanceTied(crossing, eventDistance))) {
+                eventDistance = crossing;
+                hasSideEvent = true;
+                tiedOwners[0] = adjacent;
+                tiedCount = 1u;
+            } else if (eventDistanceTied(crossing, eventDistance)) {
+                eventDistance = min(eventDistance, crossing);
+                tiedOwners[tiedCount++] = adjacent;
+            }
+        }
+        if (!hasSideEvent) {
+            if (closestDistance >= kFarDistance && hasPreviousEvent) {
+                uint corrected = tileOwnsAfterEvent(
+                    tileIndex, cameraPosition, rayDirection,
+                    previousEventDistance) ? tileIndex : 0xffffffffu;
+                for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+                    uint candidate = tileNeighbor(tile, slot);
+                    if (tileOwnsAfterEvent(candidate, cameraPosition,
+                                           rayDirection,
+                                           previousEventDistance) &&
+                        (corrected == 0xffffffffu || candidate < corrected)) {
+                        corrected = candidate;
+                    }
+                }
+                hasPreviousEvent = false;
+                if (corrected != 0xffffffffu && corrected != tileIndex) {
+                    tileIndex = corrected;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        if (tiedCount > 1u) {
+            for (uint index = 0u; index < tiedCount; ++index) {
+                uint adjacent = tiedOwners[index];
+                considerColumn(adjacent, cameraPosition, rayDirection,
+                               closestDistance, closestTile, closestTopLayer);
+            }
+        }
+        if (closestDistance < eventDistance ||
+            eventDistanceTied(closestDistance, eventDistance) ||
+            tiedCount == 0u) {
+            break;
+        }
+
+        float nextTravel = nextTravelUlp(eventDistance);
+        uint nextTile = 0xffffffffu;
+        for (uint index = 0u; index < tiedCount; ++index) {
+            uint candidate = tiedOwners[index];
+            if (tileOwnsAfterEvent(candidate, cameraPosition,
+                                   rayDirection, eventDistance) &&
+                (nextTile == 0xffffffffu || candidate < nextTile)) {
+                nextTile = candidate;
+            }
+        }
+        if (nextTile == 0xffffffffu) {
+            for (uint index = 0u; index < tiedCount; ++index) {
+                GeodesicTile eventTile = geodesicTiles[tiedOwners[index]];
+                for (uint slot = 0u; slot < geodesicTileNeighborCount(eventTile); ++slot) {
+                    uint candidate = tileNeighbor(eventTile, slot);
+                    if (tileOwnsAfterEvent(candidate, cameraPosition,
+                                           rayDirection, eventDistance) &&
+                        (nextTile == 0xffffffffu || candidate < nextTile)) {
+                        nextTile = candidate;
+                    }
+                }
+            }
+        }
+        if (nextTile == 0xffffffffu) {
+            nextTile = tiedOwners[0];
+            for (uint index = 1u; index < tiedCount; ++index) {
+                nextTile = min(nextTile, tiedOwners[index]);
+            }
+        }
+        travel = nextTravel;
+        previousEventDistance = eventDistance;
+        hasPreviousEvent = true;
+        tileIndex = nextTile;
+    }
+
+    if (closestTile == 0xffffffffu) {
+        return;
+    }
+    GeodesicTile hitTile = geodesicTiles[closestTile];
+    uvec4 hitPage = geodesicPageTable[closestTile];
+    bool resident = (hitPage.z & 1u) != 0u && hitPage.x != 0xffffffffu;
+    uint physicalOffset = resident ? hitPage.x * geodesicTileLayerCount(hitTile) : 0u;
+    if (frame.editMode == 1u &&
+        closestTopLayer + 1 < int(geodesicTileLayerCount(hitTile))) {
+        uint material = geodesicTilePentagon(hitTile) != 0u ? 2u : 1u;
+        uint addedLayer = uint(closestTopLayer + 1);
+        if (resident) {
+            tileBrickCells[physicalOffset + addedLayer] = material;
+        }
+        geodesicColumnStates[closestTile].x |= 1u << addedLayer;
+        geodesicColumnStates[closestTile].y = addedLayer + 1u;
+        geodesicColumnStates[closestTile].z =
+            (geodesicColumnStates[closestTile].z & ~0xffu) | material;
+        geodesicColumnStates[closestTile].w = 1u;
+#if VOXEL_SCALE_LAB
+        updateEditedAoRing(closestTile);
+        atomicOr(geodesicFarField[0], 1u);
+        atomicOr(geodesicMacroNodes[0].x, 1u);
+#endif
+    } else if (frame.editMode == 2u && closestTopLayer > 0) {
+        uint removedLayer = uint(closestTopLayer);
+        if (resident) {
+            tileBrickCells[physicalOffset + removedLayer] = 0u;
+        }
+        geodesicColumnStates[closestTile].x &= ~(1u << removedLayer);
+        geodesicColumnStates[closestTile].y = removedLayer;
+        geodesicColumnStates[closestTile].w = 1u;
+#if VOXEL_SCALE_LAB
+        updateEditedAoRing(closestTile);
+        atomicOr(geodesicFarField[0], 1u);
+        atomicOr(geodesicMacroNodes[0].x, 1u);
+#endif
+    }
+}

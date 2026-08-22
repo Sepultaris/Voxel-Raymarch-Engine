@@ -1,0 +1,88 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+
+#define VOXEL_SHARED_INLINE
+#define VOXEL_SHARED_UINT uint
+#include "shared/geodesic_material_shared.inc"
+#undef VOXEL_SHARED_UINT
+#undef VOXEL_SHARED_INLINE
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "shared/geodesic_tile_query_shared.inc"
+layout(std430, set = 0, binding = 5) readonly buffer GeodesicTileBuffer {
+    GeodesicTile geodesicTiles[];
+};
+layout(std430, set = 0, binding = 7) buffer TileBrickBuffer {
+    uint tileBrickCells[];
+};
+layout(std430, set = 0, binding = 9) buffer GeodesicColumnStateBuffer {
+    uvec4 geodesicColumnStates[];
+};
+layout(std430, set = 0, binding = 10) readonly buffer GeodesicPageTableBuffer {
+    uvec4 geodesicPageTable[];
+};
+
+layout(push_constant) uniform FrameConstants {
+    float time;
+    float planetRadius;
+    uint maxMarchSteps;
+    float hitEpsilon;
+    uvec2 resolution;
+    float cameraDistance;
+    uint voxelResolution;
+    float cameraYaw;
+    float cameraPitch;
+    vec2 brushNdc;
+    uint editMode;
+    uint brushMaterial;
+    uint simulationTick;
+    uint visualizationMode;
+    uint surfaceTileCount;
+    uint residentPageCount;
+    float planetOuterScale;
+    uint geodesicTraversalMode;
+    uint streamSamplePhase;
+    uint terrainSeed;
+    float terrainContinentScale;
+    float terrainContinentStrength;
+    float terrainMountainScale;
+    float terrainMountainStrength;
+    float terrainRoughness;
+    float terrainOceanLevel;
+    float terrainPolarStrength;
+    uint cameraMode;
+    float surfaceHeading;
+    float surfaceLookPitch;
+} frame;
+#include "shared/geodesic_terrain_shared.inc"
+
+void main() {
+    uint tileIndex = gl_GlobalInvocationID.x;
+    if (tileIndex >= frame.surfaceTileCount) {
+        return;
+    }
+
+    GeodesicTile tile = geodesicTiles[tileIndex];
+    vec3 direction = normalize(tile.center.xyz);
+    uint filledLayers = 0u;
+    uint surfaceMaterial = 0u;
+    evaluateGeodesicTerrain(direction, filledLayers, surfaceMaterial);
+    uint layerCount = geodesicTileLayerCount(tile);
+    uint occupancyMask = filledLayers == 32u
+                             ? 0xffffffffu
+                             : (1u << filledLayers) - 1u;
+
+    geodesicColumnStates[tileIndex] =
+        uvec4(occupancyMask, filledLayers, surfaceMaterial, 0u);
+
+    uvec4 page = geodesicPageTable[tileIndex];
+    if ((page.z & 1u) == 0u || page.x == 0xffffffffu) {
+        return;
+    }
+    uint physicalOffset = page.x * layerCount;
+    for (uint layer = 0u; layer < layerCount; ++layer) {
+        tileBrickCells[physicalOffset + layer] =
+            geodesicMaterialForLayer(filledLayers, surfaceMaterial, layer);
+    }
+}

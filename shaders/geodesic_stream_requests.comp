@@ -1,0 +1,202 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#ifndef VOXEL_TILE_LOOKUP_WIDTH
+#define VOXEL_TILE_LOOKUP_WIDTH 512
+#endif
+#ifndef VOXEL_TILE_LOOKUP_HEIGHT
+#define VOXEL_TILE_LOOKUP_HEIGHT 256
+#endif
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#include "shared/geodesic_tile_query_shared.inc"
+layout(std430, set = 0, binding = 5) readonly buffer GeodesicTileBuffer {
+    GeodesicTile geodesicTiles[];
+};
+layout(std430, set = 0, binding = 6) readonly buffer TileLookupBuffer {
+    uint tileDirectionLookup[];
+};
+layout(std430, set = 0, binding = 9) readonly buffer GeodesicColumnStateBuffer {
+    uvec4 geodesicColumnStates[];
+};
+layout(std430, set = 0, binding = 10) buffer GeodesicPageTableBuffer {
+    uvec4 geodesicPageTable[];
+};
+layout(std430, set = 0, binding = 11) buffer GeodesicPageRequestBuffer {
+    uint pageRequestCount;
+    uint pageRequestOverflow;
+    uint pageRequestFrame;
+    uint pageRequestReserved;
+    uvec4 pageRequests[];
+};
+
+layout(push_constant) uniform FrameConstants {
+    float time;
+    float planetRadius;
+    uint maxMarchSteps;
+    float hitEpsilon;
+    uvec2 resolution;
+    float cameraDistance;
+    uint voxelResolution;
+    float cameraYaw;
+    float cameraPitch;
+    vec2 brushNdc;
+    uint editMode;
+    uint brushMaterial;
+    uint simulationTick;
+    uint visualizationMode;
+    uint surfaceTileCount;
+    uint residentPageCount;
+    float planetOuterScale;
+    uint geodesicTraversalMode;
+    uint streamSamplePhase;
+    uint terrainSeed;
+    float terrainContinentScale;
+    float terrainContinentStrength;
+    float terrainMountainScale;
+    float terrainMountainStrength;
+    float terrainRoughness;
+    float terrainOceanLevel;
+    float terrainPolarStrength;
+    uint cameraMode;
+    float surfaceHeading;
+    float surfaceLookPitch;
+} frame;
+
+const uint kPageRequestCapacity = 16384u;
+const uint kTileLookupWidth = VOXEL_TILE_LOOKUP_WIDTH;
+const uint kTileLookupHeight = VOXEL_TILE_LOOKUP_HEIGHT;
+const float kPi = 3.14159265358979323846;
+const float kGoldenConjugate = 0.6180339887498948482;
+const float kResidentTargetFraction = 0.90;
+
+uint tileNeighbor(GeodesicTile tile, uint slot) {
+    return geodesicTileNeighbor(tile, slot);
+}
+
+uint findSurfaceTile(vec3 direction) {
+    float longitude = atan(direction.z, direction.x);
+    float latitude = asin(clamp(direction.y, -1.0, 1.0));
+    uint lookupX = min(uint((longitude / (2.0 * kPi) + 0.5) * float(kTileLookupWidth)),
+                       kTileLookupWidth - 1u);
+    uint lookupY = min(uint((0.5 - latitude / kPi) * float(kTileLookupHeight)),
+                       kTileLookupHeight - 1u);
+    uint tileIndex = tileDirectionLookup[lookupX + kTileLookupWidth * lookupY];
+
+    // The atlas supplies a close seed. The neighbor walk resolves the exact
+    // geodesic Voronoi cell without a topology-wide search.
+    for (uint iteration = 0u; iteration < 8u; ++iteration) {
+        GeodesicTile tile = geodesicTiles[tileIndex];
+        float bestAlignment = dot(direction, tile.center.xyz);
+        uint bestTile = tileIndex;
+        for (uint slot = 0u; slot < geodesicTileNeighborCount(tile); ++slot) {
+            uint candidate = tileNeighbor(tile, slot);
+            float alignment = dot(direction, geodesicTiles[candidate].center.xyz);
+            if (alignment > bestAlignment) {
+                bestAlignment = alignment;
+                bestTile = candidate;
+            }
+        }
+        if (bestTile == tileIndex) {
+            break;
+        }
+        tileIndex = bestTile;
+    }
+    return tileIndex;
+}
+
+uint collisionProfileTile(uint seedTile, uint sampleIndex) {
+    if (sampleIndex == 0u) {
+        return seedTile;
+    }
+    GeodesicTile seed = geodesicTiles[seedTile];
+    if (sampleIndex <= 6u) {
+        uint slot = sampleIndex - 1u;
+        return slot < geodesicTileNeighborCount(seed)
+            ? tileNeighbor(seed, slot) : seedTile;
+    }
+    uint ringIndex = sampleIndex - 7u;
+    uint firstSlot = ringIndex / 6u;
+    uint secondSlot = ringIndex % 6u;
+    if (firstSlot >= geodesicTileNeighborCount(seed)) {
+        return seedTile;
+    }
+    uint firstTile = tileNeighbor(seed, firstSlot);
+    GeodesicTile first = geodesicTiles[firstTile];
+    return secondSlot < geodesicTileNeighborCount(first)
+        ? tileNeighbor(first, secondSlot) : firstTile;
+}
+
+void main() {
+    uint sampleIndex = gl_GlobalInvocationID.x;
+    if (sampleIndex >= kPageRequestCapacity || frame.visualizationMode == 0u ||
+        frame.surfaceTileCount == 0u) {
+        return;
+    }
+
+    float orbit = frame.cameraYaw + (frame.cameraMode == 0u ? frame.time : 0.0);
+    float cosinePitch = cos(frame.cameraPitch);
+    vec3 cameraDirection = normalize(vec3(sin(orbit) * cosinePitch,
+                                          sin(frame.cameraPitch),
+                                          cos(orbit) * cosinePitch));
+    bool collisionProfile = frame.cameraMode == 1u && sampleIndex < 43u;
+    vec3 reference = abs(cameraDirection.y) < 0.95
+                         ? vec3(0.0, 1.0, 0.0)
+                         : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(reference, cameraDirection));
+    vec3 bitangent = cross(cameraDirection, tangent);
+
+    // A spherical cap containing approximately one physical cache worth of
+    // columns. Cranley-Patterson phase shifts change both radius and azimuth
+    // each frame so stationary cameras converge instead of resampling the same
+    // subset forever.
+    float residentFraction = min(float(frame.residentPageCount) * kResidentTargetFraction /
+                                 max(float(frame.surfaceTileCount), 1.0), 1.0);
+    float capCosine = clamp(1.0 - 2.0 * residentFraction, -1.0, 0.999999);
+    float phase = fract(float(frame.streamSamplePhase) * 0.7548776662466927);
+    float capCoordinate = fract((float(sampleIndex) + 0.5) /
+                                float(kPageRequestCapacity) + phase * kGoldenConjugate);
+    float cosineAngle = mix(1.0, capCosine, capCoordinate);
+    float sineAngle = sqrt(max(1.0 - cosineAngle * cosineAngle, 0.0));
+    float azimuth = 2.0 * kPi * fract(float(sampleIndex) * kGoldenConjugate + phase);
+    vec3 sampleDirection = normalize(cameraDirection * cosineAngle +
+        (tangent * cos(azimuth) + bitangent * sin(azimuth)) * sineAngle);
+
+    uint tileIndex = collisionProfile
+        ? collisionProfileTile(findSurfaceTile(cameraDirection), sampleIndex)
+        : findSurfaceTile(sampleDirection);
+    uvec4 page = geodesicPageTable[tileIndex];
+    if (!collisionProfile &&
+        (page.z & 1u) != 0u && page.x != 0xffffffffu) {
+        return;
+    }
+
+    // Several low-discrepancy directions can resolve to the same geodesic
+    // cell. The reserved page-table word is a generation stamp, avoiding a
+    // second topology-sized bitset and ensuring the CPU sees each tile at most
+    // once per frame.
+    uint previousStamp = atomicExchange(
+        geodesicPageTable[tileIndex].w, frame.streamSamplePhase);
+    if (previousStamp == frame.streamSamplePhase) {
+        if (collisionProfile) {
+            pageRequests[sampleIndex] = uvec4(0xffffffffu);
+        }
+        return;
+    }
+
+    uvec4 columnState = geodesicColumnStates[tileIndex];
+    uint packedState = (columnState.y & 0xffu) | (columnState.z << 8u);
+    if (collisionProfile) {
+        pageRequests[sampleIndex] =
+            uvec4(tileIndex, page.y, columnState.x, packedState);
+        return;
+    }
+
+    uint requestIndex = atomicAdd(pageRequestCount, 1u);
+    if (requestIndex < kPageRequestCapacity) {
+        pageRequests[requestIndex] =
+            uvec4(tileIndex, page.y, columnState.x, packedState);
+    } else {
+        atomicAdd(pageRequestOverflow, 1u);
+    }
+}

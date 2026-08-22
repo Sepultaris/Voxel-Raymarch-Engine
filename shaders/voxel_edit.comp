@@ -1,0 +1,165 @@
+#version 460
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 1) buffer CellBuffer {
+    uint cells[];
+};
+layout(std430, set = 0, binding = 2) buffer OccupancyBuffer {
+    uint macrocellOccupancy[];
+};
+
+layout(push_constant) uniform FrameConstants {
+    float time;
+    float planetRadius;
+    uint maxMarchSteps;
+    float hitEpsilon;
+    uvec2 resolution;
+    float cameraDistance;
+    uint voxelResolution;
+    float cameraYaw;
+    float cameraPitch;
+    vec2 brushNdc;
+    uint editMode;
+    uint brushMaterial;
+    uint simulationTick;
+    uint visualizationMode;
+    uint surfaceTileCount;
+    uint residentPageCount;
+    float planetOuterScale;
+    uint geodesicTraversalMode;
+    uint streamSamplePhase;
+    uint terrainSeed;
+    float terrainContinentScale;
+    float terrainContinentStrength;
+    float terrainMountainScale;
+    float terrainMountainStrength;
+    float terrainRoughness;
+    float terrainOceanLevel;
+    float terrainPolarStrength;
+    uint cameraMode;
+    float surfaceHeading;
+    float surfaceLookPitch;
+} frame;
+
+const uint kMacrocellSize = 8;
+const uint kMaximumDdaSteps = 512;
+
+uint flattenCell(uvec3 cell, uint resolution) {
+    return cell.x + resolution * (cell.y + resolution * cell.z);
+}
+
+uint flattenMacrocell(uvec3 cell, uint resolution) {
+    uint macroResolution = resolution / kMacrocellSize;
+    uvec3 macrocell = cell / kMacrocellSize;
+    return macrocell.x + macroResolution * (macrocell.y + macroResolution * macrocell.z);
+}
+
+bool insideGrid(ivec3 cell) {
+    return all(greaterThanEqual(cell, ivec3(0))) &&
+           all(lessThan(cell, ivec3(int(frame.voxelResolution))));
+}
+
+float axisExitDistance(float position, float direction, float minimumValue, float maximumValue) {
+    if (abs(direction) < 1e-8) {
+        return 1e30;
+    }
+    float boundary = direction > 0.0 ? maximumValue : minimumValue;
+    return max((boundary - position) / direction, 0.0);
+}
+
+bool intersectVolume(vec3 origin, vec3 direction, float halfExtent, out float nearDistance) {
+    vec3 inverseDirection = 1.0 / direction;
+    vec3 first = (-vec3(halfExtent) - origin) * inverseDirection;
+    vec3 second = (vec3(halfExtent) - origin) * inverseDirection;
+    vec3 minimums = min(first, second);
+    vec3 maximums = max(first, second);
+    nearDistance = max(max(minimums.x, minimums.y), minimums.z);
+    float farDistance = min(min(maximums.x, maximums.y), maximums.z);
+    return farDistance >= max(nearDistance, 0.0);
+}
+
+void buildCameraFrame(out vec3 cameraPosition, out vec3 forward,
+                      out vec3 right, out vec3 up) {
+    float yaw = frame.cameraYaw + (frame.cameraMode == 0u ? frame.time : 0.0);
+    float cosinePitch = cos(frame.cameraPitch);
+    vec3 radial = normalize(vec3(sin(yaw) * cosinePitch,
+                                 sin(frame.cameraPitch),
+                                 cos(yaw) * cosinePitch));
+    cameraPosition = radial * frame.cameraDistance;
+    if (frame.cameraMode == 0u) {
+        forward = -radial;
+        right = normalize(cross(forward, vec3(0.0, 1.0, 0.0)));
+        up = cross(right, forward);
+        return;
+    }
+    vec3 reference = abs(radial.y) < 0.95
+                         ? vec3(0.0, 1.0, 0.0)
+                         : vec3(0.0, 0.0, 1.0);
+    vec3 tangentRight = normalize(cross(reference, radial));
+    vec3 tangentForward = normalize(cross(radial, tangentRight));
+    vec3 horizontalForward = normalize(
+        tangentForward * cos(frame.surfaceHeading) +
+        tangentRight * sin(frame.surfaceHeading));
+    forward = normalize(horizontalForward * cos(frame.surfaceLookPitch) +
+                        radial * sin(frame.surfaceLookPitch));
+    right = normalize(cross(forward, radial));
+    up = normalize(cross(right, forward));
+}
+
+void main() {
+    if (frame.editMode == 0u) {
+        return;
+    }
+
+    vec3 cameraPosition;
+    vec3 forward;
+    vec3 right;
+    vec3 up;
+    buildCameraFrame(cameraPosition, forward, right, up);
+    vec2 screen = frame.brushNdc;
+    screen.y = -screen.y;
+    screen.x *= float(frame.resolution.x) / float(frame.resolution.y);
+    vec3 direction = normalize(forward + screen.x * right + screen.y * up);
+
+    float halfExtent = frame.planetRadius * 1.15;
+    float travel = 0.0;
+    if (!intersectVolume(cameraPosition, direction, halfExtent, travel)) {
+        return;
+    }
+    travel = max(travel, 0.0) + frame.hitEpsilon;
+    vec3 gridMinimum = vec3(-halfExtent);
+    float cellSize = (2.0 * halfExtent) / float(frame.voxelResolution);
+    ivec3 previousCell = ivec3(-1);
+
+    for (uint iteration = 0; iteration < kMaximumDdaSteps; ++iteration) {
+        vec3 position = cameraPosition + direction * travel;
+        ivec3 cell = ivec3(floor((position - gridMinimum) / cellSize));
+        if (!insideGrid(cell)) {
+            return;
+        }
+
+        uvec3 unsignedCell = uvec3(cell);
+        uint index = flattenCell(unsignedCell, frame.voxelResolution);
+        uint material = cells[index] & 0xffu;
+        if (material != 0u) {
+            if (frame.editMode == 2u) {
+                cells[index] = 0u;
+            } else if (frame.editMode == 1u && insideGrid(previousCell)) {
+                uvec3 placementCell = uvec3(previousCell);
+                cells[flattenCell(placementCell, frame.voxelResolution)] = frame.brushMaterial;
+                atomicOr(macrocellOccupancy[flattenMacrocell(placementCell, frame.voxelResolution)], 1u);
+            }
+            return;
+        }
+
+        previousCell = cell;
+        vec3 cellMinimum = gridMinimum + vec3(cell) * cellSize;
+        vec3 cellMaximum = cellMinimum + vec3(cellSize);
+        vec3 exitDistances = vec3(
+            axisExitDistance(position.x, direction.x, cellMinimum.x, cellMaximum.x),
+            axisExitDistance(position.y, direction.y, cellMinimum.y, cellMaximum.y),
+            axisExitDistance(position.z, direction.z, cellMinimum.z, cellMaximum.z));
+        travel += min(exitDistances.x, min(exitDistances.y, exitDistances.z)) + cellSize * 0.001;
+    }
+}

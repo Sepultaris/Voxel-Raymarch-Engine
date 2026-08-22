@@ -1,0 +1,266 @@
+#version 460
+
+#ifndef VOXEL_FRACTAL_VOXEL_SDF_LAB
+#define VOXEL_FRACTAL_VOXEL_SDF_LAB 0
+#endif
+
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+layout(std430, set = 0, binding = 1) buffer CellBuffer {
+    uint cells[];
+};
+layout(std430, set = 0, binding = 2) buffer OccupancyBuffer {
+    uint macrocellOccupancy[];
+};
+
+#if VOXEL_FRACTAL_VOXEL_SDF_LAB
+layout(push_constant) uniform InitConstants {
+    float time;
+    float planetRadius;
+    uint maxMarchSteps;
+    float hitEpsilon;
+    uvec2 renderResolution;
+    float cameraDistance;
+    uint voxelResolution;
+    float cameraYaw;
+    float cameraPitch;
+    vec2 brushNdc;
+    uint editMode;
+    uint brushMaterial;
+    uint simulationTick;
+    uint visualizationMode;
+    uint surfaceTileCount;
+    uint residentPageCount;
+    float planetOuterScale;
+    uint geodesicTraversalMode;
+    uint streamSamplePhase;
+    uint terrainSeed;
+    float terrainContinentScale;
+    float terrainContinentStrength;
+    float terrainMountainScale;
+    float terrainMountainStrength;
+    float terrainRoughness;
+    float terrainOceanLevel;
+    float terrainPolarStrength;
+    uint cameraMode;
+    float surfaceHeading;
+    float surfaceLookPitch;
+} init;
+#else
+layout(push_constant) uniform InitConstants {
+    float _unusedTime;
+    float _unusedPlanetRadius;
+    uint _unusedSteps;
+    float _unusedEpsilon;
+    uvec2 _unusedRenderResolution;
+    float _unusedCameraDistance;
+    uint voxelResolution;
+} init;
+#endif
+
+const uint kMacrocellSize = 8;
+
+#if VOXEL_FRACTAL_VOXEL_SDF_LAB
+const uint kFractalVoxelCacheResolution = 664u;
+const uint kFractalVoxelCacheHeader = 16u;
+const uint kFractalVoxelCachePlane =
+    kFractalVoxelCacheResolution * kFractalVoxelCacheResolution;
+const float kFractalVoxelParentAngularWidth = 0.003;
+const float kFractalVoxelBaseRadius = 1.012;
+const float kFractalVoxelSeaRadius = 1.006;
+const uint kFractalVoxelMaximumLevels = 10u;
+
+uint fractalCacheHash(uint value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    return value ^ (value >> 16u);
+}
+
+float fractalCachePhase(uint seed, uint lane) {
+    uint bits = fractalCacheHash(seed ^ (0x9e3779b9u * (lane + 1u)));
+    return float(bits & 0x00ffffffu) *
+        (6.2831853071795864769 / 16777216.0);
+}
+
+float fractalCacheMicroRelief() {
+    float packedFraction = float((init.visualizationMode >> 23u) & 0xffu) *
+        (0.20 / 255.0);
+    return packedFraction * 0.09;
+}
+
+float fractalCacheSurfaceRadius(vec3 direction, float continuousLevel,
+                                out float fieldCavity) {
+    const vec3 basis0 = vec3(0.5773502692);
+    const vec3 basis1 = vec3(0.7071067812, -0.7071067812, 0.0);
+    const vec3 basis2 = vec3(0.4082482905, 0.4082482905, -0.8164965809);
+    float terrain = kFractalVoxelBaseRadius;
+    fieldCavity = 0.0;
+    float macroFrequency[3] = float[3](1.7, 4.3, 11.0);
+    float macroAmplitude[3] = float[3](0.010, 0.006, 0.003);
+    uint macroLane[3] = uint[3](40u, 50u, 60u);
+    for (uint band = 0u; band < 3u; ++band) {
+        float frequency = macroFrequency[band];
+        vec3 angle = vec3(
+            frequency * dot(direction, basis0) +
+                fractalCachePhase(init.terrainSeed, macroLane[band] + 0u),
+            frequency * dot(direction, basis1) +
+                fractalCachePhase(init.terrainSeed, macroLane[band] + 1u),
+            frequency * dot(direction, basis2) +
+                fractalCachePhase(init.terrainSeed, macroLane[band] + 2u));
+        vec3 sineValue = sin(angle);
+        float bandValue = macroAmplitude[band] *
+            sineValue.x * sineValue.y * sineValue.z;
+        terrain += bandValue;
+    }
+    float amplitude = fractalCacheMicroRelief() * 0.5;
+    float frequency = 48.0;
+    for (uint octave = 0u; octave < kFractalVoxelMaximumLevels; ++octave) {
+        float weight = smoothstep(0.0, 1.0,
+            continuousLevel - float(octave));
+        if (weight > 0.0) {
+            vec3 angle = vec3(
+                frequency * dot(direction, basis0) +
+                    fractalCachePhase(init.terrainSeed, octave * 3u + 0u),
+                frequency * dot(direction, basis1) +
+                    fractalCachePhase(init.terrainSeed, octave * 3u + 1u),
+                frequency * dot(direction, basis2) +
+                    fractalCachePhase(init.terrainSeed, octave * 3u + 2u));
+            vec3 sineValue = sin(angle);
+            float bandShape = sineValue.x * sineValue.y * sineValue.z;
+            float bandValue = amplitude * weight * bandShape;
+            terrain += bandValue;
+            // The highest active octave dominates local curvature because its
+            // frequency is greatest. Its negative lobe is a cheap, smooth
+            // band-limited cavity proxy; weight keeps octave activation
+            // continuous without per-frame neighborhood reads.
+            fieldCavity = max(-bandShape, 0.0) * weight;
+        }
+        amplitude *= 0.5;
+        frequency *= 2.0;
+    }
+    if (terrain <= kFractalVoxelSeaRadius) {
+        fieldCavity = 0.0;
+        return kFractalVoxelSeaRadius;
+    }
+    return terrain;
+}
+
+uint packFractalCacheSample(float height, float cavity) {
+    const float heightMinimum = 0.96;
+    const float heightRange = 0.10;
+    uint quantizedHeight = uint(round(clamp(
+        (height - heightMinimum) / heightRange, 0.0, 1.0) * 16777215.0));
+    uint quantizedCavity = uint(round(clamp(cavity, 0.0, 1.0) * 255.0));
+    return (quantizedCavity << 24u) | (quantizedHeight & 0x00ffffffu);
+}
+
+void main() {
+    uvec3 invocation = gl_GlobalInvocationID.xyz;
+    if (any(greaterThanEqual(invocation, uvec3(init.voxelResolution)))) {
+        return;
+    }
+    uint flattened = invocation.x + init.voxelResolution *
+        (invocation.y + init.voxelResolution * invocation.z);
+    uint cacheLevel = min((init.visualizationMode >> 9u) & 0xfu,
+                          kFractalVoxelMaximumLevels);
+    float morph = float((init.visualizationMode >> 13u) & 0xffu) / 255.0;
+    float cosinePitch = cos(init.cameraPitch);
+    vec3 radial = normalize(vec3(
+        sin(init.cameraYaw) * cosinePitch,
+        sin(init.cameraPitch),
+        cos(init.cameraYaw) * cosinePitch));
+    vec3 reference = abs(radial.y) < 0.95
+        ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 right = normalize(cross(reference, radial));
+    vec3 forward = normalize(cross(radial, right));
+    float parentSize = init.planetRadius *
+        kFractalVoxelParentAngularWidth / exp2(float(cacheLevel));
+    if (flattened == 0u) {
+        cells[0] = 0x46564348u;
+        cells[1] = cacheLevel;
+        cells[2] = floatBitsToUint(morph);
+        cells[3] = floatBitsToUint(parentSize);
+        cells[4] = floatBitsToUint(radial.x);
+        cells[5] = floatBitsToUint(radial.y);
+        cells[6] = floatBitsToUint(radial.z);
+        cells[7] = floatBitsToUint(right.x);
+        cells[8] = floatBitsToUint(right.y);
+        cells[9] = floatBitsToUint(right.z);
+        cells[10] = floatBitsToUint(forward.x);
+        cells[11] = floatBitsToUint(forward.y);
+        cells[12] = floatBitsToUint(forward.z);
+        cells[13] = init.terrainSeed;
+        cells[14] = init.streamSamplePhase;
+        cells[15] = kFractalVoxelCacheResolution;
+    }
+    uint dataCount = 2u * kFractalVoxelCachePlane;
+    if (flattened >= dataCount) {
+        return;
+    }
+    uint grid = flattened / kFractalVoxelCachePlane;
+    uint index = flattened - grid * kFractalVoxelCachePlane;
+    uint x = index % kFractalVoxelCacheResolution;
+    uint y = index / kFractalVoxelCacheResolution;
+    uint sampleLevel = min(cacheLevel + grid,
+                           kFractalVoxelMaximumLevels);
+    float sampleSize = init.planetRadius *
+        kFractalVoxelParentAngularWidth / exp2(float(sampleLevel));
+    float halfGrid = float(kFractalVoxelCacheResolution - 1u) * 0.5;
+    vec2 tangentOffset = (vec2(x, y) - vec2(halfGrid)) * sampleSize;
+    vec3 direction = normalize(radial +
+        (right * tangentOffset.x + forward * tangentOffset.y) /
+            init.planetRadius);
+    float continuousLevel = float(cacheLevel) + morph;
+    float fieldCavity;
+    float surfaceRadius = fractalCacheSurfaceRadius(
+        direction, continuousLevel, fieldCavity);
+    float cavity = smoothstep(0.08, 0.72, fieldCavity);
+    cells[kFractalVoxelCacheHeader + grid * kFractalVoxelCachePlane + index] =
+        packFractalCacheSample(surfaceRadius, cavity);
+}
+
+#else
+
+uint flattenCell(uvec3 cell, uint resolution) {
+    return cell.x + resolution * (cell.y + resolution * cell.z);
+}
+
+uint flattenMacrocell(uvec3 cell, uint resolution) {
+    uint macroResolution = resolution / kMacrocellSize;
+    uvec3 macrocell = cell / kMacrocellSize;
+    return macrocell.x + macroResolution * (macrocell.y + macroResolution * macrocell.z);
+}
+
+float hash31(vec3 point) {
+    return fract(sin(dot(point, vec3(17.17, 91.73, 43.11))) * 43758.5453);
+}
+
+void main() {
+    uvec3 cell = gl_GlobalInvocationID.xyz;
+    if (any(greaterThanEqual(cell, uvec3(init.voxelResolution)))) {
+        return;
+    }
+
+    vec3 normalizedPosition = ((vec3(cell) + 0.5) / float(init.voxelResolution)) * 2.3 - 1.15;
+    float radius = length(normalizedPosition);
+    float surfaceNoise = (hash31(floor(normalizedPosition * 24.0)) - 0.5) * 0.035;
+    uint material = 0u;
+    if (radius <= 0.88 + surfaceNoise) {
+        material = 1u;
+    } else {
+        vec3 radialUp = normalize(normalizedPosition + vec3(1e-6));
+        float sandNoise = hash31(floor(normalizedPosition * 40.0));
+        bool inSandShell = radius > 0.97 && radius <= 1.04 + surfaceNoise;
+        if (inSandShell && radialUp.y > 0.42 && sandNoise > 0.30) {
+            material = 2u;
+        }
+    }
+
+    cells[flattenCell(cell, init.voxelResolution)] = material;
+    if (material != 0u) {
+        atomicOr(macrocellOccupancy[flattenMacrocell(cell, init.voxelResolution)], 1u);
+    }
+}
+#endif

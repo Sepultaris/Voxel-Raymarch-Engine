@@ -1,0 +1,70 @@
+# CMake build trees and generated project files
+/build*/
+/cmake-build-*/
+/out/
+/Testing/
+CMakeCache.txt
+CMakeFiles/
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+CMakeUserPresets.json
+
+# Downloaded/generated dependency trees
+/_deps/
+/vcpkg_installed/
+
+# Compiled binaries and debug data
+*.a
+*.dll
+*.dylib
+*.exe
+*.ilk
+*.lib
+*.o
+*.obj
+*.pdb
+*.so
+*.spv
+
+# Generated topology/GR caches and runtime captures
+/cache/
+/.cache/
+/artifacts/
+
+# Runtime and diagnostic state
+imgui.ini
+*.log
+*.partial
+*.tmp
+*.trace
+
+# IDE and editor-local files
+/.idea/
+/.vs/
+/.vscode/
+*.suo
+*.user
+*.userprefs
+*.VC.db
+*.VC.VC.opendb
+
+# Python tooling sometimes used by diagnostics
+__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.venv/
+
+# OS metadata and backup files
+.DS_Store
+Desktop.ini
+Thumbs.db
+*~
+*.bak
+*.orig
+*.swp
