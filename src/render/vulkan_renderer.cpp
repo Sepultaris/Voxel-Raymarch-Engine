@@ -53,6 +53,11 @@ constexpr bool kFractalPlanetSdfBuild = VOXEL_FRACTAL_PLANET_SDF_LAB != 0;
 constexpr bool kFractalVoxelSdfBuild = VOXEL_FRACTAL_VOXEL_SDF_LAB != 0;
 constexpr bool kPortalLabBuild = VOXEL_PORTAL_LAB != 0;
 constexpr bool kIntrinsicPortalLabBuild = VOXEL_INTRINSIC_PORTAL_LAB != 0;
+#if defined(VOXEL_EIGHT_PLANET_SYSTEM_LAB)
+constexpr bool kEightPlanetSystemLabBuild = VOXEL_EIGHT_PLANET_SYSTEM_LAB != 0;
+#else
+constexpr bool kEightPlanetSystemLabBuild = false;
+#endif
 #if defined(VOXEL_GLOBAL_METRIC_LAB)
 constexpr bool kGlobalMetricLabBuild = VOXEL_GLOBAL_METRIC_LAB != 0;
 #else
@@ -92,6 +97,240 @@ constexpr VkDeviceSize kCellBufferSize =
     static_cast<VkDeviceSize>(kVoxelResolution) * kVoxelResolution * kVoxelResolution * sizeof(std::uint32_t);
 constexpr VkDeviceSize kOccupancyBufferSize =
     static_cast<VkDeviceSize>(kMacrocellResolution) * kMacrocellResolution * kMacrocellResolution * sizeof(std::uint32_t);
+
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+constexpr std::uint32_t kSystemHierarchyHeaderWords = 32U;
+constexpr std::uint32_t kSystemHierarchyNodeWords = 16U;
+constexpr std::uint32_t kSystemAuthorityHeaderWords = 32U;
+constexpr std::uint32_t kSystemAggregateWords = 2U;
+constexpr std::uint32_t kSystemPlanetDescriptorWords = 16U;
+constexpr std::uint32_t kSystemPageTableCapacity = 1024U;
+constexpr std::uint32_t kSystemPageTableEntryWords = 4U;
+constexpr std::uint32_t kSystemEditCapacity = 256U;
+constexpr std::uint32_t kSystemEditWords = 4U;
+constexpr std::uint32_t kSystemTelemetryWords = 16U;
+
+[[nodiscard]] std::vector<std::uint32_t> packSystemHierarchy(
+    const system_lab::SharedLodHierarchy& hierarchy) {
+    const std::uint32_t nodeWords = static_cast<std::uint32_t>(
+        hierarchy.nodes.size()) * kSystemHierarchyNodeWords;
+    const std::uint32_t leafMapOffset = kSystemHierarchyHeaderWords + nodeWords;
+    std::vector<std::uint32_t> words(
+        static_cast<std::size_t>(leafMapOffset) +
+        hierarchy.leafToFinestCoarse.size(), 0U);
+    words[0] = 0x48584c32U; // HXL2
+    words[1] = 2U;
+    words[2] = static_cast<std::uint32_t>(hierarchy.nodes.size());
+    words[3] = static_cast<std::uint32_t>(hierarchy.leafToFinestCoarse.size());
+    words[4] = leafMapOffset;
+    words[5] = hierarchy.activeLevels;
+    for (std::uint32_t level = 0U;
+         level < system_lab::kSystemCoarseLodLevels; ++level) {
+        words[6U + level] = hierarchy.levelOffsets[level];
+        words[16U + level] = hierarchy.levelCounts[level];
+    }
+    for (std::uint32_t index = 0U; index < hierarchy.nodes.size(); ++index) {
+        const system_lab::SharedLodNode& node = hierarchy.nodes[index];
+        const std::uint32_t base = kSystemHierarchyHeaderWords +
+            index * kSystemHierarchyNodeWords;
+        words[base + 0U] = std::bit_cast<std::uint32_t>(node.center[0]);
+        words[base + 1U] = std::bit_cast<std::uint32_t>(node.center[1]);
+        words[base + 2U] = std::bit_cast<std::uint32_t>(node.center[2]);
+        words[base + 3U] = std::bit_cast<std::uint32_t>(node.surfaceWidth);
+        std::copy(node.neighbors.begin(), node.neighbors.end(),
+                  words.begin() + base + 4U);
+        words[base + 10U] = node.parent;
+        words[base + 11U] = node.level;
+        words[base + 12U] = node.pentagon ? 1U : 0U;
+    }
+    std::copy(hierarchy.leafToFinestCoarse.begin(),
+              hierarchy.leafToFinestCoarse.end(),
+              words.begin() + leafMapOffset);
+    return words;
+}
+
+[[nodiscard]] std::vector<std::uint32_t> gatherPinnedSystemPages(
+    const GeodesicTopology& topology, std::array<float, 3> direction) {
+    const std::uint32_t center = system_lab::locateGeodesicTile(topology, direction);
+    std::set<std::uint32_t> visited{center};
+    std::set<std::uint32_t> frontier{center};
+    for (std::uint32_t ring = 0U; ring < 2U; ++ring) {
+        std::set<std::uint32_t> next;
+        for (const std::uint32_t tileIndex : frontier) {
+            const GeodesicTileGpu& tile = topology.tiles[tileIndex];
+            for (std::uint32_t slot = 0U; slot < tile.brickInfo[2]; ++slot) {
+                const std::uint32_t neighbor = slot < 4U
+                    ? tile.neighborsLow[slot]
+                    : tile.neighborsHigh[slot - 4U];
+                if (visited.insert(neighbor).second) next.insert(neighbor);
+            }
+        }
+        frontier = std::move(next);
+    }
+    std::set<std::uint32_t> pages;
+    for (const std::uint32_t tileIndex : visited) {
+        pages.insert(tileIndex / system_lab::kSystemPageColumns);
+    }
+    return {pages.begin(), pages.end()};
+}
+
+[[nodiscard]] std::vector<std::uint32_t> packSystemAuthorities(
+    const GeodesicTopology& topology,
+    const system_lab::SharedLodHierarchy& hierarchy,
+    const system_lab::Settings& settings) {
+    const auto aggregates = system_lab::buildPlanetAggregates(
+        topology, hierarchy, settings.planetSeeds);
+    const std::uint32_t aggregateOffset = kSystemAuthorityHeaderWords;
+    const std::uint32_t aggregateStride = static_cast<std::uint32_t>(
+        hierarchy.nodes.size()) * kSystemAggregateWords;
+    const std::uint32_t descriptorOffset = aggregateOffset +
+        system_lab::kPlanetCount * aggregateStride;
+    const std::uint32_t pageTableOffset = descriptorOffset +
+        system_lab::kPlanetCount * kSystemPlanetDescriptorWords;
+    const std::uint32_t pageTableStride =
+        kSystemPageTableCapacity * kSystemPageTableEntryWords;
+    const std::uint32_t residentOffset = pageTableOffset +
+        system_lab::kPlanetCount * pageTableStride;
+    const std::uint32_t residentStride =
+        system_lab::kSystemResidentPagesPerPlanet *
+        system_lab::kSystemPageColumns;
+    const std::uint32_t editOffset = residentOffset +
+        system_lab::kPlanetCount * residentStride;
+    const std::uint32_t editStride = kSystemEditCapacity * kSystemEditWords;
+    const std::uint32_t telemetryOffset = editOffset +
+        system_lab::kPlanetCount * editStride;
+    const std::uint32_t totalWords = telemetryOffset +
+        system_lab::kPlanetCount * kSystemTelemetryWords;
+    std::vector<std::uint32_t> words(totalWords, 0U);
+    words[0] = 0x41555432U; // AUT2
+    words[1] = 3U;
+    words[2] = static_cast<std::uint32_t>(hierarchy.nodes.size());
+    words[3] = system_lab::kPlanetCount;
+    words[4] = aggregateOffset;
+    words[5] = aggregateStride;
+    words[6] = descriptorOffset;
+    words[7] = kSystemPlanetDescriptorWords;
+    words[8] = pageTableOffset;
+    words[9] = pageTableStride;
+    words[10] = kSystemPageTableCapacity;
+    words[11] = residentOffset;
+    words[12] = residentStride;
+    words[13] = system_lab::kSystemResidentPagesPerPlanet;
+    words[14] = editOffset;
+    words[15] = editStride;
+    words[16] = kSystemEditCapacity;
+    words[17] = telemetryOffset;
+    words[18] = kSystemTelemetryWords;
+    words[19] = totalWords;
+    words[20] = std::bit_cast<std::uint32_t>(0.92F);
+    words[21] = std::bit_cast<std::uint32_t>(0.12F);
+    words[22] = kSystemAggregateWords;
+
+    for (std::uint32_t planet = 0U; planet < system_lab::kPlanetCount; ++planet) {
+        for (std::uint32_t node = 0U; node < hierarchy.nodes.size(); ++node) {
+            const system_lab::Aggregate& aggregate = aggregates[planet][node];
+            const std::uint32_t base = aggregateOffset + planet * aggregateStride +
+                node * kSystemAggregateWords;
+            const system_lab::PackedAggregateGpu packed =
+                system_lab::packAggregateGpu(aggregate);
+            words[base + 0U] = packed.heights;
+            words[base + 1U] = packed.materialError;
+        }
+
+        const std::uint32_t descriptor = descriptorOffset +
+            planet * kSystemPlanetDescriptorWords;
+        words[descriptor + 0U] = settings.planetSeeds[planet];
+        words[descriptor + 1U] = 1U;
+        words[descriptor + 2U] = system_lab::kSystemResidentPagesPerPlanet;
+        words[descriptor + 3U] = 0U; // active sparse edits; capacity is in header[16]
+        const system_lab::AtmosphereCloudControls media{
+            0.16F + 0.018F * static_cast<float>(planet),
+            0.055F + 0.004F * static_cast<float>(planet % 3U),
+            0.34F + 0.055F * static_cast<float>(planet % 4U),
+            0.48F + 0.045F * static_cast<float>(planet % 3U),
+            0.038F, 0.082F};
+        words[descriptor + 4U] = std::bit_cast<std::uint32_t>(media.atmosphereDensity);
+        words[descriptor + 5U] = std::bit_cast<std::uint32_t>(media.atmosphereHeight);
+        words[descriptor + 6U] = std::bit_cast<std::uint32_t>(media.cloudCoverage);
+        words[descriptor + 7U] = std::bit_cast<std::uint32_t>(media.cloudDensity);
+        words[descriptor + 8U] = std::bit_cast<std::uint32_t>(media.cloudBase);
+        words[descriptor + 9U] = std::bit_cast<std::uint32_t>(media.cloudTop);
+
+        const std::uint32_t tableBase = pageTableOffset + planet * pageTableStride;
+        for (std::uint32_t entry = 0U; entry < kSystemPageTableCapacity; ++entry) {
+            words[tableBase + entry * kSystemPageTableEntryWords] = 0xffffffffU;
+        }
+        const auto planets = system_lab::defaultPlanets();
+        const system_lab::BodyFrame frame = system_lab::evaluateOrbit(
+            planets[planet].orbit, 0.0, 0.0);
+        const std::array<float, 3> pinnedDirection{
+            static_cast<float>(frame.radial.x),
+            static_cast<float>(frame.radial.y),
+            static_cast<float>(frame.radial.z)};
+        const std::uint32_t editedTile = system_lab::locateGeodesicTile(
+            topology, pinnedDirection);
+        std::vector<std::uint32_t> virtualPages = gatherPinnedSystemPages(
+            topology, pinnedDirection);
+        const std::uint32_t virtualPageCount = static_cast<std::uint32_t>(
+            (topology.tiles.size() + system_lab::kSystemPageColumns - 1U) /
+            system_lab::kSystemPageColumns);
+        std::set<std::uint32_t> used(virtualPages.begin(), virtualPages.end());
+        for (std::uint32_t physical = static_cast<std::uint32_t>(virtualPages.size());
+             physical < system_lab::kSystemResidentPagesPerPlanet; ++physical) {
+            std::uint32_t candidate = (physical * 7919U + planet * 977U) %
+                virtualPageCount;
+            while (!used.insert(candidate).second) {
+                candidate = (candidate + 1U) % virtualPageCount;
+            }
+            virtualPages.push_back(candidate);
+        }
+        virtualPages.resize(system_lab::kSystemResidentPagesPerPlanet);
+        const std::uint32_t poolBase = residentOffset + planet * residentStride;
+        for (std::uint32_t physical = 0U;
+             physical < system_lab::kSystemResidentPagesPerPlanet; ++physical) {
+            const std::uint32_t virtualPage = virtualPages[physical];
+            std::uint32_t slot = system_lab::systemAvalanche(virtualPage) &
+                (kSystemPageTableCapacity - 1U);
+            while (words[tableBase + slot * kSystemPageTableEntryWords] != 0xffffffffU) {
+                slot = (slot + 1U) & (kSystemPageTableCapacity - 1U);
+            }
+            const std::uint32_t entry = tableBase + slot * kSystemPageTableEntryWords;
+            words[entry + 0U] = virtualPage;
+            words[entry + 1U] = physical;
+            words[entry + 2U] = 1U;
+            words[entry + 3U] = physical < virtualPages.size() ? 1U : 0U;
+            for (std::uint32_t column = 0U;
+                 column < system_lab::kSystemPageColumns; ++column) {
+                const std::uint32_t tile = virtualPage * system_lab::kSystemPageColumns +
+                    column;
+                const system_lab::CompactColumnState state =
+                    system_lab::generatedColumn(settings.planetSeeds[planet], tile);
+                words[poolBase + physical * system_lab::kSystemPageColumns + column] =
+                    system_lab::packCompactColumnGpu(state);
+            }
+        }
+        const std::uint32_t editsBase = editOffset + planet * editStride;
+        for (std::uint32_t edit = 0U; edit < kSystemEditCapacity; ++edit) {
+            words[editsBase + edit * kSystemEditWords] = 0xffffffffU;
+        }
+        const std::uint32_t editedLayers = 14U + planet % 7U;
+        words[editsBase + 0U] = editedTile;
+        words[editsBase + 1U] = editedLayers | (7U << 8U) | (2U << 16U);
+        words[editsBase + 2U] = 1U;
+        words[editsBase + 3U] = 0U;
+        words[descriptor + 3U] = 1U;
+        std::uint32_t dirtyNode = hierarchy.leafToFinestCoarse[editedTile];
+        for (;;) {
+            const std::uint32_t aggregateBase = aggregateOffset +
+                planet * aggregateStride + dirtyNode * kSystemAggregateWords;
+            words[aggregateBase + 1U] |= 0x80000000U;
+            if (hierarchy.nodes[dirtyNode].level == 0U) break;
+            dirtyNode = hierarchy.nodes[dirtyNode].parent;
+        }
+    }
+    return words;
+}
+#endif
 
 using CameraVector = std::array<float, 3>;
 
@@ -223,10 +462,137 @@ std::vector<std::byte> readBinaryFile(const std::filesystem::path& path) {
     return 0U;
 }
 
+[[nodiscard]] std::uint32_t pngCrc32(const std::uint8_t* data,
+                                     std::size_t size) noexcept {
+    std::uint32_t crc = 0xffffffffU;
+    for (std::size_t index = 0; index < size; ++index) {
+        crc ^= data[index];
+        for (std::uint32_t bit = 0; bit < 8U; ++bit) {
+            const std::uint32_t mask = 0U - (crc & 1U);
+            crc = (crc >> 1U) ^ (0xedb88320U & mask);
+        }
+    }
+    return ~crc;
+}
+
+void appendBigEndian(std::vector<std::uint8_t>& bytes, std::uint32_t value) {
+    bytes.push_back(static_cast<std::uint8_t>(value >> 24U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 16U));
+    bytes.push_back(static_cast<std::uint8_t>(value >> 8U));
+    bytes.push_back(static_cast<std::uint8_t>(value));
+}
+
+void appendPngChunk(std::vector<std::uint8_t>& png,
+                    const std::array<char, 4>& type,
+                    const std::vector<std::uint8_t>& payload) {
+    appendBigEndian(png, static_cast<std::uint32_t>(payload.size()));
+    const std::size_t crcBegin = png.size();
+    for (const char value : type) {
+        png.push_back(static_cast<std::uint8_t>(value));
+    }
+    png.insert(png.end(), payload.begin(), payload.end());
+    appendBigEndian(png, pngCrc32(png.data() + crcBegin,
+                                 png.size() - crcBegin));
+}
+
+[[nodiscard]] bool writePngRgba8(const std::filesystem::path& outputPath,
+                                 std::uint32_t width, std::uint32_t height,
+                                 const std::uint8_t* rgba,
+                                 std::string& error) {
+    if (width == 0U || height == 0U || rgba == nullptr) {
+        error = "capture image is empty";
+        return false;
+    }
+    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4U;
+    std::vector<std::uint8_t> scanlines;
+    scanlines.reserve((rowBytes + 1U) * static_cast<std::size_t>(height));
+    for (std::uint32_t y = 0U; y < height; ++y) {
+        scanlines.push_back(0U); // PNG filter: None
+        const std::uint8_t* row = rgba + static_cast<std::size_t>(y) * rowBytes;
+        scanlines.insert(scanlines.end(), row, row + rowBytes);
+    }
+
+    std::vector<std::uint8_t> zlib;
+    zlib.reserve(scanlines.size() + scanlines.size() / 65535U * 5U + 8U);
+    zlib.push_back(0x78U);
+    zlib.push_back(0x01U); // deflate, no compression; deterministic
+    std::size_t offset = 0U;
+    while (offset < scanlines.size()) {
+        const std::size_t count = std::min<std::size_t>(
+            65535U, scanlines.size() - offset);
+        const bool finalBlock = offset + count == scanlines.size();
+        zlib.push_back(finalBlock ? 1U : 0U);
+        const std::uint16_t length = static_cast<std::uint16_t>(count);
+        const std::uint16_t inverse = static_cast<std::uint16_t>(~length);
+        zlib.push_back(static_cast<std::uint8_t>(length));
+        zlib.push_back(static_cast<std::uint8_t>(length >> 8U));
+        zlib.push_back(static_cast<std::uint8_t>(inverse));
+        zlib.push_back(static_cast<std::uint8_t>(inverse >> 8U));
+        zlib.insert(zlib.end(), scanlines.begin() +
+                    static_cast<std::ptrdiff_t>(offset),
+                    scanlines.begin() +
+                    static_cast<std::ptrdiff_t>(offset + count));
+        offset += count;
+    }
+    std::uint32_t adlerA = 1U;
+    std::uint32_t adlerB = 0U;
+    for (const std::uint8_t value : scanlines) {
+        adlerA = (adlerA + value) % 65521U;
+        adlerB = (adlerB + adlerA) % 65521U;
+    }
+    appendBigEndian(zlib, (adlerB << 16U) | adlerA);
+
+    std::vector<std::uint8_t> png{
+        137U, 80U, 78U, 71U, 13U, 10U, 26U, 10U};
+    std::vector<std::uint8_t> ihdr;
+    appendBigEndian(ihdr, width);
+    appendBigEndian(ihdr, height);
+    ihdr.insert(ihdr.end(), {8U, 6U, 0U, 0U, 0U});
+    appendPngChunk(png, {'I', 'H', 'D', 'R'}, ihdr);
+    appendPngChunk(png, {'I', 'D', 'A', 'T'}, zlib);
+    appendPngChunk(png, {'I', 'E', 'N', 'D'}, {});
+
+    std::error_code filesystemError;
+    if (!outputPath.parent_path().empty()) {
+        std::filesystem::create_directories(
+            outputPath.parent_path(), filesystemError);
+        if (filesystemError) {
+            error = "unable to create capture directory: " +
+                filesystemError.message();
+            return false;
+        }
+    }
+    const std::filesystem::path temporary = outputPath.string() + ".partial";
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            error = "unable to open capture output";
+            return false;
+        }
+        output.write(reinterpret_cast<const char*>(png.data()),
+                     static_cast<std::streamsize>(png.size()));
+        if (!output) {
+            error = "unable to write capture output";
+            return false;
+        }
+    }
+    std::filesystem::remove(outputPath, filesystemError);
+    filesystemError.clear();
+    std::filesystem::rename(temporary, outputPath, filesystemError);
+    if (filesystemError) {
+        std::filesystem::remove(temporary);
+        error = "unable to finalize capture: " + filesystemError.message();
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
-VulkanRenderer::VulkanRenderer(SDL_Window* window, bool forceTopologyRegeneration)
-    : window_(window), forceTopologyRegeneration_(forceTopologyRegeneration) {
+VulkanRenderer::VulkanRenderer(SDL_Window* window, bool forceTopologyRegeneration,
+                               bool headlessCapture)
+    : window_(window), headlessCapture_(headlessCapture),
+      forceTopologyRegeneration_(forceTopologyRegeneration) {
     try {
         initialize();
     } catch (...) {
@@ -239,11 +605,111 @@ VulkanRenderer::~VulkanRenderer() {
     shutdown();
 }
 
+bool VulkanRenderer::captureOutputPng(const std::filesystem::path& outputPath,
+                                      std::string& error) {
+    error.clear();
+    if (!outputImageInitialized_) {
+        error = "no completed frame is available";
+        return false;
+    }
+    try {
+        checkVk(vkWaitForFences(device_, 1, &frameFence_, VK_TRUE,
+                                std::numeric_limits<std::uint64_t>::max()),
+                "Waiting for capture frame");
+        const VkDeviceSize captureBytes =
+            static_cast<VkDeviceSize>(swapchainExtent_.width) *
+            static_cast<VkDeviceSize>(swapchainExtent_.height) * 4U;
+        VkBuffer captureBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory captureMemory = VK_NULL_HANDLE;
+        const auto cleanup = [&]() {
+            if (captureBuffer != VK_NULL_HANDLE) {
+                vkDestroyBuffer(device_, captureBuffer, nullptr);
+            }
+            if (captureMemory != VK_NULL_HANDLE) {
+                vkFreeMemory(device_, captureMemory, nullptr);
+            }
+        };
+        try {
+            VkBufferCreateInfo bufferInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bufferInfo.size = captureBytes;
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            checkVk(vkCreateBuffer(device_, &bufferInfo, nullptr, &captureBuffer),
+                    "Creating capture readback buffer");
+            VkMemoryRequirements requirements{};
+            vkGetBufferMemoryRequirements(device_, captureBuffer, &requirements);
+            VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            allocation.allocationSize = requirements.size;
+            allocation.memoryTypeIndex = findMemoryType(
+                requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                    VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            checkVk(vkAllocateMemory(device_, &allocation, nullptr, &captureMemory),
+                    "Allocating capture readback memory");
+            checkVk(vkBindBufferMemory(device_, captureBuffer, captureMemory, 0U),
+                    "Binding capture readback memory");
+
+            checkVk(vkResetFences(device_, 1, &frameFence_),
+                    "Resetting capture fence");
+            checkVk(vkResetCommandBuffer(commandBuffer_, 0U),
+                    "Resetting capture command buffer");
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            checkVk(vkBeginCommandBuffer(commandBuffer_, &begin),
+                    "Beginning capture commands");
+            VkBufferImageCopy copy{};
+            copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy.imageSubresource.layerCount = 1U;
+            copy.imageExtent = {swapchainExtent_.width, swapchainExtent_.height, 1U};
+            vkCmdCopyImageToBuffer(commandBuffer_, outputImage_,
+                                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   captureBuffer, 1U, &copy);
+            VkBufferMemoryBarrier ready{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+            ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            ready.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            ready.buffer = captureBuffer;
+            ready.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT, 0U, 0U, nullptr,
+                                 1U, &ready, 0U, nullptr);
+            checkVk(vkEndCommandBuffer(commandBuffer_),
+                    "Ending capture commands");
+            VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            submit.commandBufferCount = 1U;
+            submit.pCommandBuffers = &commandBuffer_;
+            checkVk(vkQueueSubmit(queue_, 1U, &submit, frameFence_),
+                    "Submitting capture commands");
+            checkVk(vkWaitForFences(device_, 1, &frameFence_, VK_TRUE,
+                                    std::numeric_limits<std::uint64_t>::max()),
+                    "Waiting for capture readback");
+            void* mapped = nullptr;
+            checkVk(vkMapMemory(device_, captureMemory, 0U, captureBytes, 0U,
+                                &mapped), "Mapping capture readback");
+            const bool written = writePngRgba8(
+                outputPath, swapchainExtent_.width, swapchainExtent_.height,
+                static_cast<const std::uint8_t*>(mapped), error);
+            vkUnmapMemory(device_, captureMemory);
+            cleanup();
+            return written;
+        } catch (...) {
+            cleanup();
+            throw;
+        }
+    } catch (const std::exception& exception) {
+        error = exception.what();
+        return false;
+    }
+}
+
 void VulkanRenderer::initialize() {
     startupBegin_ = std::chrono::steady_clock::now();
     if constexpr (kPortalLabBuild) {
-        SDL_ShowWindow(window_);
-        SDL_RaiseWindow(window_);
+        if (!headlessCapture_) {
+            SDL_ShowWindow(window_);
+            SDL_RaiseWindow(window_);
+        }
         SDL_SetWindowTitle(window_,
 #if VOXEL_INTRINSIC_PORTAL_LAB
 #if VOXEL_GLOBAL_METRIC_LAB
@@ -323,7 +789,7 @@ void VulkanRenderer::initialize() {
         SDL_SetWindowTitle(window_,
 #if VOXEL_INTRINSIC_PORTAL_LAB
 #if VOXEL_GLOBAL_METRIC_LAB
-            "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - NATIVE ELLIS ATLAS");
+            "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - SAME-EXTERIOR SMOOTH HANDLE ATLAS");
 #else
             "Voxel Planet Engine - INTRINSIC ELLIS MANIFOLD Lab");
 #endif
@@ -873,6 +1339,40 @@ void VulkanRenderer::createPlanetTopologyResources() {
     const VkDeviceSize streamUploadBytes = static_cast<VkDeviceSize>(kPageStreamBudget) *
         (static_cast<VkDeviceSize>(planetTopology_.brickResolution) * sizeof(std::uint32_t) +
          2U * sizeof(GeodesicPageTableEntryGpu));
+    VkDeviceSize eightPlanetHierarchyBytes = 0U;
+    VkDeviceSize eightPlanetAuthorityBytes = 0U;
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    if constexpr (kEightPlanetSystemLabBuild) {
+        eightPlanetHierarchy_ = system_lab::buildSharedLodHierarchy(planetTopology_);
+        eightPlanetHierarchyWords_ = packSystemHierarchy(eightPlanetHierarchy_);
+        eightPlanetAuthorityWords_ = packSystemAuthorities(
+            planetTopology_, eightPlanetHierarchy_, system_lab::Settings{});
+        eightPlanetAuthoritySeeds_ = system_lab::Settings{}.planetSeeds;
+        eightPlanetHierarchyBytes = static_cast<VkDeviceSize>(
+            eightPlanetHierarchyWords_.size() * sizeof(std::uint32_t));
+        eightPlanetAuthorityBytes = static_cast<VkDeviceSize>(
+            eightPlanetAuthorityWords_.size() * sizeof(std::uint32_t));
+        const std::uint64_t topologyBytes =
+            planetTopology_.tiles.size() * sizeof(GeodesicTileGpu) +
+            planetTopology_.directionLookup.size() * sizeof(std::uint32_t);
+        const std::uint64_t totalBytes = topologyBytes + eightPlanetHierarchyBytes +
+            eightPlanetAuthorityBytes;
+        stats_.systemImmutableTopologyBytes = topologyBytes;
+        stats_.systemSharedHierarchyBytes = eightPlanetHierarchyBytes;
+        stats_.systemAuthorityBytes = eightPlanetAuthorityBytes;
+        std::cout << "Eight-planet authority memory: immutable topology "
+                  << topologyBytes / (1024U * 1024U) << " MiB, shared LOD "
+                  << eightPlanetHierarchyBytes / (1024U * 1024U)
+                  << " MiB, eight sparse authorities "
+                  << eightPlanetAuthorityBytes / (1024U * 1024U)
+                  << " MiB, total " << totalBytes / (1024U * 1024U)
+                  << " MiB\n";
+        if (totalBytes > system_lab::kSystemAuthorityMemoryGuardrail) {
+            throw std::runtime_error(
+                "Eight-planet authority memory guardrail exceeded");
+        }
+    }
+#endif
 
     const auto createBuffer = [this](VkDeviceSize size, VkBufferUsageFlags usage,
                                      VkMemoryPropertyFlags memoryFlags,
@@ -934,6 +1434,32 @@ void VulkanRenderer::createPlanetTopologyResources() {
                      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
                      geodesicMacroHierarchyBuffer_,
                      geodesicMacroHierarchyMemory_);
+    }
+    if constexpr (kEightPlanetSystemLabBuild) {
+        createBuffer(eightPlanetHierarchyBytes,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     eightPlanetHierarchyBuffer_, eightPlanetHierarchyMemory_);
+        void* hierarchyMapped = nullptr;
+        checkVk(vkMapMemory(device_, eightPlanetHierarchyMemory_, 0,
+                            eightPlanetHierarchyBytes, 0, &hierarchyMapped),
+                "Mapping shared eight-planet LOD hierarchy");
+        std::memcpy(hierarchyMapped, eightPlanetHierarchyWords_.data(),
+                    static_cast<std::size_t>(eightPlanetHierarchyBytes));
+        vkUnmapMemory(device_, eightPlanetHierarchyMemory_);
+        createBuffer(eightPlanetAuthorityBytes,
+                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                     eightPlanetAuthorityBuffer_, eightPlanetAuthorityMemory_);
+        checkVk(vkMapMemory(device_, eightPlanetAuthorityMemory_, 0,
+                            eightPlanetAuthorityBytes, 0,
+                            &eightPlanetAuthorityMapped_),
+                "Mapping eight independent planet authorities");
+        std::memcpy(eightPlanetAuthorityMapped_,
+                    eightPlanetAuthorityWords_.data(),
+                    static_cast<std::size_t>(eightPlanetAuthorityBytes));
     }
     checkVk(vkMapMemory(device_, geodesicPageRequestMemory_, 0, pageRequestBytes, 0,
                         &geodesicPageRequestMapped_),
@@ -1279,12 +1805,27 @@ void VulkanRenderer::createComputeResources() {
         artifactDiagnosticBuffer_, 0, artifactDiagnosticBytes};
     VkDescriptorBufferInfo farFieldInfo{geodesicFarFieldBuffer_, 0, kFarFieldBytes};
     VkDescriptorBufferInfo macroHierarchyInfo{
-        kScaleLabBuild ? geodesicMacroHierarchyBuffer_ : geodesicTileBuffer_, 0,
-        kScaleLabBuild ? kMacroHierarchyBytes : tileBytes};
+        kScaleLabBuild ? geodesicMacroHierarchyBuffer_
+                       : kEightPlanetSystemLabBuild ? eightPlanetHierarchyBuffer_
+                                                    : geodesicTileBuffer_,
+        0,
+        kScaleLabBuild ? kMacroHierarchyBytes
+                       : kEightPlanetSystemLabBuild
+                             ? static_cast<VkDeviceSize>(
+                                   eightPlanetHierarchyWords_.size() *
+                                   sizeof(std::uint32_t))
+                             : tileBytes};
     VkDescriptorBufferInfo portalParameterInfo{
-        kPortalLabBuild ? portalLabParameterBuffer_ : geodesicTileBuffer_, 0,
+        kPortalLabBuild ? portalLabParameterBuffer_
+                        : kEightPlanetSystemLabBuild ? eightPlanetAuthorityBuffer_
+                                                     : geodesicTileBuffer_,
+        0,
         kPortalLabBuild ? static_cast<VkDeviceSize>(sizeof(PortalLabGpuBuffer))
-                        : tileBytes};
+                        : kEightPlanetSystemLabBuild
+                              ? static_cast<VkDeviceSize>(
+                                    eightPlanetAuthorityWords_.size() *
+                                    sizeof(std::uint32_t))
+                              : tileBytes};
     for (std::uint32_t setIndex = 0; setIndex < computeDescriptorSets_.size(); ++setIndex) {
         VkDescriptorBufferInfo sourceInfo{cellBuffers_[setIndex], 0, kCellBufferSize};
         VkDescriptorBufferInfo destinationInfo{cellBuffers_[1U - setIndex], 0, kCellBufferSize};
@@ -2294,6 +2835,50 @@ void VulkanRenderer::render(float time, const RenderSettings& settings) {
     }
     processArtifactDiagnostics();
     processPageRequests(time, settings);
+    if constexpr (kEightPlanetSystemLabBuild) {
+        auto* words = static_cast<std::uint32_t*>(eightPlanetAuthorityMapped_);
+        const std::uint32_t telemetryOffset = words[17];
+        const std::uint32_t telemetryStride = words[18];
+        for (std::uint32_t planet = 0U;
+             planet < system_lab::kPlanetCount; ++planet) {
+            std::uint32_t* telemetry = words + telemetryOffset +
+                planet * telemetryStride;
+            stats_.systemGeneratedPageEvaluations += telemetry[1];
+            stats_.systemStalePageRejects += telemetry[2];
+            stats_.systemConservativeBoundaryRefinements += telemetry[3];
+            stats_.systemCoarseHits += telemetry[4];
+            stats_.systemExactHits += telemetry[5];
+            stats_.systemEditHits += telemetry[6];
+            stats_.systemNonfiniteOutputs += telemetry[7];
+            stats_.systemCracksOrClosedShellMisses += telemetry[8];
+            stats_.systemDifferentialSamples += telemetry[9];
+            stats_.systemDifferentialHitMismatches += telemetry[10];
+            stats_.systemDifferentialDepthMismatches += telemetry[11];
+            stats_.systemDifferentialMaterialMismatches += telemetry[12];
+            stats_.systemAdaptiveBudgetFallbacks += telemetry[13];
+            stats_.systemReferenceBudgetFallbacks += telemetry[14];
+            std::fill_n(telemetry, telemetryStride, 0U);
+        }
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        if (eightPlanetAuthoritySeeds_ !=
+            settings.eightPlanetSystem.planetSeeds) {
+            const std::vector<std::uint32_t> replacement =
+                packSystemAuthorities(planetTopology_, eightPlanetHierarchy_,
+                                      settings.eightPlanetSystem);
+            if (replacement.size() != eightPlanetAuthorityWords_.size()) {
+                throw std::runtime_error(
+                    "Eight-planet authority rebuild changed fixed GPU layout");
+            }
+            eightPlanetAuthorityWords_ = replacement;
+            std::memcpy(eightPlanetAuthorityMapped_,
+                        eightPlanetAuthorityWords_.data(),
+                        eightPlanetAuthorityWords_.size() *
+                            sizeof(std::uint32_t));
+            eightPlanetAuthoritySeeds_ =
+                settings.eightPlanetSystem.planetSeeds;
+        }
+#endif
+    }
     if constexpr (kPortalLabBuild) {
 #if VOXEL_INTRINSIC_PORTAL_LAB
         auto* portalBuffer = static_cast<IntrinsicEllisGpuBuffer*>(
@@ -2519,10 +3104,35 @@ void VulkanRenderer::render(float time, const RenderSettings& settings) {
     constants.surfaceTileCount = static_cast<std::uint32_t>(planetTopology_.tiles.size());
     constants.residentPageCount = planetTopology_.residentPageCount();
     constants.planetOuterScale = planetTopology_.outerBoundingRadius;
-    constants.geodesicTraversalMode = kReferenceTraversalEnabled
+    constants.geodesicTraversalMode = kEightPlanetSystemLabBuild
+        ? settings.geodesicTraversalMode
+        : kReferenceTraversalEnabled
                                           ? settings.geodesicTraversalMode
                                           : std::clamp(settings.geodesicTraversalMode, 2U,
                                                        kScaleLabBuild ? 8U : 7U);
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    const auto& system = settings.eightPlanetSystem;
+    constants.systemStar = {system.starRadius, system.starRadiance,
+                            settings.timeScale, 0.0F};
+    constants.systemStarColor = {system.starColor[0], system.starColor[1],
+                                 system.starColor[2], 0.0F};
+    constants.systemAmbient = {system.ambientColor[0], system.ambientColor[1],
+                               system.ambientColor[2], system.ambientStrength};
+    const std::uint32_t systemDebugView =
+        settings.visualizationMode == 106U ? 4U
+        : settings.visualizationMode == 103U ? 2U
+                                            : system.debugView;
+    constants.systemControl = {system.shadowSamples, systemDebugView,
+                               system.selectedPlanet, 0U};
+    std::copy_n(system.planetRadii.begin(), 4U,
+                constants.systemPlanetRadii0.begin());
+    std::copy_n(system.planetRadii.begin() + 4, 4U,
+                constants.systemPlanetRadii1.begin());
+    std::copy_n(system.planetSeeds.begin(), 4U,
+                constants.systemPlanetSeeds0.begin());
+    std::copy_n(system.planetSeeds.begin() + 4, 4U,
+                constants.systemPlanetSeeds1.begin());
+#endif
     ++pageFeedbackGeneration_;
     if (pageFeedbackGeneration_ == 0U) {
         ++pageFeedbackGeneration_;
@@ -3469,6 +4079,22 @@ void VulkanRenderer::shutdown() noexcept {
         }
         if (geodesicMacroHierarchyMemory_ != VK_NULL_HANDLE) {
             vkFreeMemory(device_, geodesicMacroHierarchyMemory_, nullptr);
+        }
+        if (eightPlanetHierarchyBuffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, eightPlanetHierarchyBuffer_, nullptr);
+        }
+        if (eightPlanetHierarchyMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, eightPlanetHierarchyMemory_, nullptr);
+        }
+        if (eightPlanetAuthorityMapped_ != nullptr) {
+            vkUnmapMemory(device_, eightPlanetAuthorityMemory_);
+            eightPlanetAuthorityMapped_ = nullptr;
+        }
+        if (eightPlanetAuthorityBuffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(device_, eightPlanetAuthorityBuffer_, nullptr);
+        }
+        if (eightPlanetAuthorityMemory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, eightPlanetAuthorityMemory_, nullptr);
         }
         if (artifactDiagnosticMapped_ != nullptr) {
             vkUnmapMemory(device_, artifactDiagnosticMemory_);

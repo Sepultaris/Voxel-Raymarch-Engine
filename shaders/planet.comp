@@ -31,6 +31,9 @@
 #ifndef VOXEL_GLOBAL_METRIC_LAB
 #define VOXEL_GLOBAL_METRIC_LAB 0
 #endif
+#ifndef VOXEL_EIGHT_PLANET_SYSTEM_LAB
+#define VOXEL_EIGHT_PLANET_SYSTEM_LAB 0
+#endif
 #ifndef VOXEL_GLOBAL_SPATIAL_AA_PASS
 #define VOXEL_GLOBAL_SPATIAL_AA_PASS 0
 #endif
@@ -110,6 +113,10 @@ layout(std430, set = 0, binding = 15) readonly buffer GeodesicFarFieldBuffer {
 layout(std430, set = 0, binding = 16) readonly buffer GeodesicMacroHierarchyBuffer {
     uvec4 geodesicMacroNodes[];
 };
+#elif VOXEL_EIGHT_PLANET_SYSTEM_LAB
+layout(std430, set = 0, binding = 16) readonly buffer SystemSharedLodBuffer {
+    uint systemHierarchyWords[];
+};
 #endif
 #if VOXEL_PORTAL_LAB
 layout(std430, set = 0, binding = 17) buffer PortalLabParameterBuffer {
@@ -138,6 +145,10 @@ layout(std430, set = 0, binding = 17) buffer PortalLabParameterBuffer {
     vec4 portalGrExit[256];
     vec4 portalGrObserver[9216];
     uvec4 portalGrTelemetry;
+};
+#elif VOXEL_EIGHT_PLANET_SYSTEM_LAB
+layout(std430, set = 0, binding = 17) buffer SystemAuthorityBuffer {
+    uint systemAuthorityWords[];
 };
 #endif
 #if VOXEL_ENABLE_REFERENCE_TRAVERSAL
@@ -186,6 +197,16 @@ layout(push_constant) uniform FrameConstants {
     uint cameraMode;
     float surfaceHeading;
     float surfaceLookPitch;
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    vec4 systemStar;           // radius, radiance, orbit speed, reserved
+    vec4 systemStarColor;
+    vec4 systemAmbient;        // rgb, strength
+    uvec4 systemControl;       // shadow samples, debug, selected planet, flags
+    vec4 systemPlanetRadii0;
+    vec4 systemPlanetRadii1;
+    uvec4 systemPlanetSeeds0;
+    uvec4 systemPlanetSeeds1;
+#endif
 } frame;
 
 const float kFarDistance = 100.0;
@@ -992,6 +1013,1147 @@ uint lookupSurfaceTileSeed(vec3 direction) {
 uint findSurfaceTile(vec3 direction) {
     return refineSurfaceTile(lookupSurfaceTileSeed(direction), direction);
 }
+
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+// Standalone, unpromoted system-scene path. All planets reuse the one immutable
+// f512 geodesic tile/neighbor atlas above; only transform, seed and compact
+// appearance state vary per planet.
+const uint kSystemPlanetCount = 8u;
+const uint kSystemHierarchyHeaderWords = 32u;
+const uint kSystemHierarchyNodeWords = 16u;
+const uint kSystemPageColumns = 32u;
+const uint kSystemPageEntryWords = 4u;
+const uint kSystemEditWords = 4u;
+// A grazing ray can cross substantially more than 32 f512 Voronoi prisms
+// between the conservative outer bound and its first radial cap. Keep this
+// bounded for watchdog safety, but large enough that the exact differential
+// is decided by leaf DDA instead of the closed-shell fallback.
+const uint kSystemMaximumLeafSteps = 2048u;
+const uint kSystemMaximumReferenceSteps = 2048u;
+
+struct SystemColumnState {
+    uint layers;
+    uint material;
+    uint flags;
+};
+
+struct SystemTerrainHit {
+    bool hit;
+    float distance;
+    vec3 normal;
+    uint tile;
+    uint node;
+    uint exactMaterial;
+    uint aggregateMaterial;
+    float morph;
+    float footprintPixels;
+    uint flags;
+};
+
+float systemHash(uint value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    value ^= value >> 16u;
+    return float(value & 0x00ffffffu) / 16777215.0;
+}
+
+uint systemAvalanche(uint value) {
+    value ^= value >> 16u;
+    value *= 0x7feb352du;
+    value ^= value >> 15u;
+    value *= 0x846ca68bu;
+    value ^= value >> 16u;
+    return value;
+}
+
+uint systemPlanetDescriptorWord(uint planet, uint field) {
+    return systemAuthorityWords[systemAuthorityWords[6] +
+        planet * systemAuthorityWords[7] + field];
+}
+
+uint systemFramePlanetSeed(uint planet) {
+    return planet < 4u ? frame.systemPlanetSeeds0[planet]
+                       : frame.systemPlanetSeeds1[planet - 4u];
+}
+
+uint systemTelemetryBase(uint planet) {
+    return systemAuthorityWords[17] + planet * systemAuthorityWords[18];
+}
+
+uint systemHierarchyNodeWord(uint node, uint field) {
+    return systemHierarchyWords[kSystemHierarchyHeaderWords +
+        node * kSystemHierarchyNodeWords + field];
+}
+
+vec3 systemHierarchyCenter(uint node) {
+    return vec3(uintBitsToFloat(systemHierarchyNodeWord(node, 0u)),
+                uintBitsToFloat(systemHierarchyNodeWord(node, 1u)),
+                uintBitsToFloat(systemHierarchyNodeWord(node, 2u)));
+}
+
+float systemHierarchyWidth(uint node) {
+    return uintBitsToFloat(systemHierarchyNodeWord(node, 3u));
+}
+
+uint systemHierarchyNeighbor(uint node, uint slot) {
+    return systemHierarchyNodeWord(node, 4u + slot);
+}
+
+uint systemHierarchyParent(uint node) {
+    return systemHierarchyNodeWord(node, 10u);
+}
+
+uint systemHierarchyLevel(uint node) {
+    return systemHierarchyNodeWord(node, 11u);
+}
+
+uint systemHierarchyPentagon(uint node) {
+    return systemHierarchyNodeWord(node, 12u);
+}
+
+uint systemLeafNode(uint tile) {
+    uint mapOffset = systemHierarchyWords[4];
+    return systemHierarchyWords[mapOffset + min(tile, systemHierarchyWords[3] - 1u)];
+}
+
+uvec4 systemAggregate(uint planet, uint node) {
+    uint base = systemAuthorityWords[4] + planet * systemAuthorityWords[5] +
+        node * systemAuthorityWords[22];
+    uint heights = systemAuthorityWords[base + 0u];
+    uint materialError = systemAuthorityWords[base + 1u];
+    float minimumHeight = float(heights & 0xffffu) / 65535.0;
+    float maximumHeight = float(heights >> 16u) / 65535.0;
+    uint material = (materialError & 0xffu) |
+        (materialError & 0x00000f00u) |
+        (materialError & 0x80000000u);
+    float maximumError =
+        float((materialError >> 12u) & 0xffffu) / 65535.0;
+    return uvec4(floatBitsToUint(minimumHeight),
+                 floatBitsToUint(maximumHeight), material,
+                 floatBitsToUint(maximumError));
+}
+
+SystemColumnState systemGeneratedColumn(uint planet, uint tile) {
+    uint seed = systemFramePlanetSeed(planet);
+    uint generation = systemPlanetDescriptorWord(planet, 1u);
+    uint heightBits = systemAvalanche(
+        tile ^ seed ^ generation * 0x9e3779b9u);
+    uint materialBits = systemAvalanche(
+        tile * 0x85ebca6bu ^ seed * 0xc2b2ae35u);
+    return SystemColumnState(20u + heightBits % 13u,
+                             1u + materialBits % 5u, 0u);
+}
+
+SystemColumnState systemColumnState(uint planet, uint tile) {
+    uint generation = systemPlanetDescriptorWord(planet, 1u);
+    if (systemPlanetDescriptorWord(planet, 0u) != systemFramePlanetSeed(planet)) {
+        atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 1u], 1u);
+        return systemGeneratedColumn(planet, tile);
+    }
+    uint editCount = min(systemPlanetDescriptorWord(planet, 3u),
+                         systemAuthorityWords[16]);
+    uint editBase = systemAuthorityWords[14] + planet * systemAuthorityWords[15];
+    for (uint edit = 0u; edit < editCount; ++edit) {
+        uint base = editBase + edit * kSystemEditWords;
+        if (systemAuthorityWords[base] == tile &&
+            systemAuthorityWords[base + 2u] == generation) {
+            uint packed = systemAuthorityWords[base + 1u];
+            atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 6u], 1u);
+            return SystemColumnState(packed & 0xffu,
+                                     (packed >> 8u) & 0xffu,
+                                     ((packed >> 16u) & 0xffu) | 2u);
+        }
+    }
+    uint virtualPage = tile / kSystemPageColumns;
+    uint tableBase = systemAuthorityWords[8] + planet * systemAuthorityWords[9];
+    uint capacity = systemAuthorityWords[10];
+    uint slot = systemAvalanche(virtualPage) & (capacity - 1u);
+    for (uint probe = 0u; probe < 24u; ++probe) {
+        uint entry = tableBase + slot * kSystemPageEntryWords;
+        uint key = systemAuthorityWords[entry];
+        if (key == virtualPage) {
+            if (systemAuthorityWords[entry + 2u] != generation ||
+                (systemAuthorityWords[entry + 3u] & 1u) == 0u) {
+                atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 2u], 1u);
+                return SystemColumnState(32u, 1u, 1u);
+            }
+            uint physical = systemAuthorityWords[entry + 1u];
+            uint pool = systemAuthorityWords[11] +
+                planet * systemAuthorityWords[12] +
+                physical * kSystemPageColumns + tile % kSystemPageColumns;
+            uint packed = systemAuthorityWords[pool];
+            return SystemColumnState(packed & 0xffu,
+                                     (packed >> 8u) & 0xffu,
+                                     (packed >> 16u) & 0xffu);
+        }
+        if (key == 0xffffffffu) break;
+        slot = (slot + 1u) & (capacity - 1u);
+    }
+    // The deterministic generator is an authoritative source rather than an
+    // empty cache page. It may be evaluated directly without stale acceptance;
+    // truly unknown/stale generations above remain conservatively solid.
+    atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 1u], 1u);
+    return systemGeneratedColumn(planet, tile);
+}
+
+bool systemClipPlane(vec3 planeNormal, float planeDistance,
+                     vec3 rayOrigin, vec3 rayDirection,
+                     inout float nearDistance, inout float farDistance,
+                     inout vec3 nearNormal) {
+    float originDistance = dot(planeNormal, rayOrigin) - planeDistance;
+    float denominator = dot(planeNormal, rayDirection);
+    if (abs(denominator) < 1e-12) return originDistance <= 0.0;
+    float nearSide = fma(denominator, nearDistance, originDistance);
+    float farSide = fma(denominator, farDistance, originDistance);
+    if (nearSide <= 0.0 && farSide <= 0.0) return true;
+    if (nearSide > 0.0 && farSide > 0.0) return false;
+    float distance = -originDistance / denominator;
+    if (isnan(distance) || isinf(distance)) return false;
+    distance = clamp(distance, nearDistance, farDistance);
+    if (nearSide > 0.0) {
+        if (distance > nearDistance) {
+            nearDistance = distance;
+            nearNormal = normalize(planeNormal);
+        }
+    } else {
+        farDistance = distance;
+    }
+    return nearDistance <= uintBitsToFloat(floatBitsToUint(farDistance) + 1u);
+}
+
+bool systemIntersectLeaf(uint tile, float innerHeight, float outerHeight,
+                         float sideMorph, vec3 origin, vec3 direction,
+                         out float distance, out vec3 normal) {
+    GeodesicTile cell = geodesicTiles[tile];
+    float nearDistance = 0.0;
+    float farDistance = 1e30;
+    normal = vec3(0.0);
+    if (!systemClipPlane(cell.center.xyz, outerHeight, origin, direction,
+                         nearDistance, farDistance, normal) ||
+        !systemClipPlane(-cell.center.xyz, -innerHeight, origin, direction,
+                         nearDistance, farDistance, normal)) return false;
+    for (uint slot = 0u; slot < geodesicTileNeighborCount(cell); ++slot) {
+        vec3 neighborCenter = geodesicTiles[tileNeighbor(cell, slot)].center.xyz;
+        vec3 outward = neighborCenter - cell.center.xyz;
+        float conservativeSide = geodesicTileSurfaceWidth(cell) * 0.5 *
+            (1.0 - clamp(sideMorph, 0.0, 1.0));
+        float sideDistance = mix(conservativeSide, 2e-6,
+                                 clamp(sideMorph, 0.0, 1.0)) *
+                             length(outward);
+        if (!systemClipPlane(outward, sideDistance,
+                             origin, direction, nearDistance, farDistance,
+                             normal)) return false;
+    }
+    distance = nearDistance;
+    return distance >= 0.0 && distance < 1e30;
+}
+
+bool systemIntersectCoarse(uint node, float innerHeight, float outerHeight,
+                           vec3 origin, vec3 direction,
+                           out float distance, out vec3 normal) {
+    vec3 center = systemHierarchyCenter(node);
+    float nearDistance = 0.0;
+    float farDistance = 1e30;
+    normal = vec3(0.0);
+    if (!systemClipPlane(center, outerHeight, origin, direction,
+                         nearDistance, farDistance, normal) ||
+        !systemClipPlane(-center, -innerHeight, origin, direction,
+                         nearDistance, farDistance, normal)) return false;
+    uint neighborCount = systemHierarchyPentagon(node) != 0u ? 5u : 6u;
+    for (uint slot = 0u; slot < neighborCount; ++slot) {
+        uint neighbor = systemHierarchyNeighbor(node, slot);
+        vec3 outward = systemHierarchyCenter(neighbor) - center;
+        // Descendant dual cells straddle the coarse Voronoi boundary. Expand
+        // by half a coarse-cell width so the aggregate prism contains them;
+        // adjacent expanded nodes intentionally overlap and the front-most
+        // conservative hit owns the mixed-level boundary.
+        float sideDistance =
+            systemHierarchyWidth(node) * 0.5 * length(outward);
+        if (!systemClipPlane(outward, sideDistance,
+                             origin, direction, nearDistance, farDistance,
+                             normal)) return false;
+    }
+    distance = nearDistance;
+    return distance >= 0.0 && distance < 1e30;
+}
+
+bool systemRaySphereInterval(vec3 origin, vec3 direction, vec3 center,
+                             float radius, out float nearDistance,
+                             out float farDistance) {
+    vec3 relative = origin - center;
+    float projection = dot(relative, direction);
+    float discriminant = projection * projection - dot(relative, relative) +
+                         radius * radius;
+    if (discriminant < 0.0) return false;
+    float root = sqrt(discriminant);
+    nearDistance = max(-projection - root, 0.0);
+    farDistance = -projection + root;
+    return farDistance >= nearDistance;
+}
+
+void systemPlanetState(uint index, out vec3 center, out vec3 radial,
+                       out vec3 tangent, out vec3 orbitNormal, out float radius) {
+    float orbitRadius = 7.0 + 2.75 * float(index);
+    float phase = 2.0 * kPi * float(index) / 8.0;
+    float inclination = (float(index % 3u) - 1.0) * 0.055;
+    float traversalTime = frame.visualizationMode == 104u
+        ? float(frame.streamSamplePhase) / 60.0 : 0.0;
+    float angle = phase + (frame.time + traversalTime) *
+        (0.16 / sqrt(orbitRadius));
+    float c = cos(angle);
+    float s = sin(angle);
+    float ci = cos(inclination);
+    float si = sin(inclination);
+    radial = vec3(c, s * ci, s * si);
+    tangent = vec3(-s, c * ci, c * si);
+    orbitNormal = normalize(cross(radial, tangent));
+    center = radial * orbitRadius;
+    radius = index < 4u ? frame.systemPlanetRadii0[index]
+                        : frame.systemPlanetRadii1[index - 4u];
+}
+
+void systemMouthFrame(uint planetIndex, bool outgoing, out vec3 center,
+                      out vec3 rightAxis, out vec3 upAxis, out vec3 forwardAxis,
+                      out float mouthRadius) {
+    vec3 planetCenter;
+    vec3 radial;
+    vec3 tangent;
+    vec3 orbitNormal;
+    float planetRadius;
+    systemPlanetState(planetIndex, planetCenter, radial, tangent,
+                      orbitNormal, planetRadius);
+    float signValue = outgoing ? 1.0 : -1.0;
+    forwardAxis = normalize(radial * 0.78 + orbitNormal * (0.32 * signValue));
+    rightAxis = normalize(cross(orbitNormal, forwardAxis));
+    upAxis = normalize(cross(forwardAxis, rightAxis));
+    center = planetCenter + forwardAxis * (planetRadius * 1.24);
+    mouthRadius = planetRadius * 0.31;
+}
+
+bool systemRaySphere(vec3 origin, vec3 direction, vec3 center, float radius,
+                     out float distance) {
+    vec3 relative = origin - center;
+    float projection = dot(relative, direction);
+    float discriminant = projection * projection - dot(relative, relative) + radius * radius;
+    if (discriminant < 0.0) return false;
+    float root = sqrt(discriminant);
+    distance = -projection - root;
+    if (distance <= 0.0005) distance = -projection + root;
+    return distance > 0.0005;
+}
+
+SystemTerrainHit systemTraceTerrain(uint planet, vec3 origin, vec3 direction,
+                                    float rayJacobian, bool forceExact) {
+    SystemTerrainHit result;
+    result.hit = false;
+    result.distance = 1e30;
+    result.normal = vec3(0.0);
+    result.tile = 0xffffffffu;
+    result.node = 0xffffffffu;
+    result.exactMaterial = 1u;
+    result.aggregateMaterial = 1u;
+    result.morph = 0.0;
+    result.footprintPixels = 0.0;
+    result.flags = 0u;
+    vec3 center;
+    vec3 radial;
+    vec3 tangent;
+    vec3 orbitNormal;
+    float radius;
+    systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+    vec3 localOrigin = origin - center;
+    float radialBase = uintBitsToFloat(systemAuthorityWords[20]) * radius;
+    float radialDepth = uintBitsToFloat(systemAuthorityWords[21]) * radius;
+    float outerRadius = (radialBase + radialDepth) * frame.planetOuterScale;
+    float travel;
+    float farDistance;
+    if (!systemRaySphereInterval(localOrigin, direction, vec3(0.0),
+                                 outerRadius, travel, farDistance)) return result;
+    float epsilon = max(radius * 2e-6, 1e-7);
+    uint tile = findSurfaceTile(normalize(
+        localOrigin + direction * min(travel + epsilon, farDistance)));
+    GeodesicTile leaf = geodesicTiles[tile];
+    float footprint = geodesicTileSurfaceWidth(leaf) * radius *
+        (0.5 * float(frame.resolution.y)) /
+        max(travel, radius * 0.02) * sqrt(max(rayJacobian, 0.0));
+    result.footprintPixels = footprint;
+    float selectionFootprint = forceExact ? max(footprint, 1.0) : footprint;
+    uint node = systemLeafNode(tile);
+    while (systemHierarchyLevel(node) > 0u) {
+        float nodePixels = systemHierarchyWidth(node) * radius *
+            (0.5 * float(frame.resolution.y)) /
+            max(travel, radius * 0.02) * sqrt(max(rayJacobian, 0.0));
+        if (nodePixels >= 0.25) break;
+        node = systemHierarchyParent(node);
+    }
+    result.node = node;
+    uvec4 aggregate = systemAggregate(planet, node);
+    float aggregateMaximum = clamp(uintBitsToFloat(aggregate.y), 0.0, 1.0);
+    result.aggregateMaterial = max(aggregate.z & 0xffu, 1u);
+
+    if (selectionFootprint < 0.25) {
+        uint previous = 0xffffffffu;
+        uint maximumSteps = forceExact ? kSystemMaximumReferenceSteps :
+            kSystemMaximumLeafSteps;
+        for (uint step = 0u; step < maximumSteps &&
+             travel <= farDistance; ++step) {
+            uvec4 candidateAggregate = systemAggregate(planet, node);
+            float candidateOuter = radialBase + radialDepth * clamp(
+                uintBitsToFloat(candidateAggregate.y), 0.0, 1.0);
+            float candidateDistance;
+            vec3 candidateNormal;
+            if (systemIntersectCoarse(node, radialBase, candidateOuter,
+                                       localOrigin, direction,
+                                       candidateDistance, candidateNormal) &&
+                candidateDistance >= travel - epsilon &&
+                candidateDistance <= farDistance + epsilon) {
+                result.hit = true;
+                result.distance = candidateDistance;
+                result.normal = candidateNormal;
+                result.node = node;
+                result.aggregateMaterial = max(
+                    candidateAggregate.z & 0xffu, 1u);
+                result.exactMaterial = result.aggregateMaterial;
+                result.flags = 4u |
+                    ((candidateAggregate.z & 0x80000000u) != 0u ? 32u : 0u);
+                atomicAdd(systemAuthorityWords[
+                    systemTelemetryBase(planet) + 4u], 1u);
+                return result;
+            }
+            vec3 currentCenter = systemHierarchyCenter(node);
+            float exitDistance = farDistance + epsilon;
+            uint exitNode = 0xffffffffu;
+            uint count = systemHierarchyPentagon(node) != 0u ? 5u : 6u;
+            for (uint slot = 0u; slot < count; ++slot) {
+                uint adjacent = systemHierarchyNeighbor(node, slot);
+                vec3 inward = currentCenter - systemHierarchyCenter(adjacent);
+                float denominator = dot(inward, direction);
+                if (denominator >= -1e-12) continue;
+                float crossing = -dot(inward, localOrigin) / denominator;
+                if (crossing > travel + epsilon && crossing < exitDistance &&
+                    adjacent != previous) {
+                    exitDistance = crossing;
+                    exitNode = adjacent;
+                }
+            }
+            if (exitNode == 0xffffffffu || exitDistance > farDistance) {
+                return result;
+            }
+            previous = node;
+            node = exitNode;
+            result.node = node;
+            travel = exitDistance;
+        }
+    } else {
+        uint previous = 0xffffffffu;
+        uint maximumSteps = forceExact ? kSystemMaximumReferenceSteps :
+            kSystemMaximumLeafSteps;
+        for (uint step = 0u; step < maximumSteps &&
+             travel <= farDistance; ++step) {
+            SystemColumnState state = systemColumnState(planet, tile);
+            node = systemLeafNode(tile);
+            aggregate = systemAggregate(planet, node);
+            aggregateMaximum = clamp(uintBitsToFloat(aggregate.y), 0.0, 1.0);
+            float morph = forceExact ? 1.0 :
+                smoothstep(0.25, 1.0, selectionFootprint);
+            float exactHeight = float(state.layers) / 32.0;
+            float effectiveHeight = mix(aggregateMaximum, exactHeight, morph);
+            float candidateDistance;
+            vec3 candidateNormal;
+            if (systemIntersectLeaf(tile, radialBase,
+                                    radialBase + radialDepth * effectiveHeight,
+                                    morph, localOrigin, direction,
+                                    candidateDistance, candidateNormal) &&
+                candidateDistance >= travel - epsilon &&
+                candidateDistance <= farDistance + epsilon) {
+                result.hit = true;
+                result.distance = candidateDistance;
+                result.normal = candidateNormal;
+                result.tile = tile;
+                result.node = node;
+                result.exactMaterial = state.material;
+                result.aggregateMaterial = max(aggregate.z & 0xffu, 1u);
+                result.morph = morph;
+                result.flags = state.flags | (morph >= 1.0 ? 8u : 16u);
+                if ((aggregate.z & 0x80000000u) != 0u) result.flags |= 32u;
+                atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 5u], 1u);
+                return result;
+            }
+            GeodesicTile current = geodesicTiles[tile];
+            float exitDistance = farDistance + epsilon;
+            uint exitTile = 0xffffffffu;
+            for (uint slot = 0u; slot < geodesicTileNeighborCount(current); ++slot) {
+                uint adjacent = tileNeighbor(current, slot);
+                vec3 inward = current.center.xyz -
+                    geodesicTiles[adjacent].center.xyz;
+                float denominator = dot(inward, direction);
+                if (denominator >= -1e-12) continue;
+                float crossing = -dot(inward, localOrigin) / denominator;
+                if (crossing > travel + epsilon && crossing < exitDistance &&
+                    adjacent != previous) {
+                    exitDistance = crossing;
+                    exitTile = adjacent;
+                }
+            }
+            if (exitTile == 0xffffffffu || exitDistance > farDistance) {
+                return result;
+            }
+            previous = tile;
+            tile = exitTile;
+            travel = exitDistance;
+            leaf = geodesicTiles[tile];
+            footprint = geodesicTileSurfaceWidth(leaf) * radius *
+                (0.5 * float(frame.resolution.y)) /
+                max(travel, radius * 0.02) * sqrt(max(rayJacobian, 0.0));
+        }
+    }
+
+    // Only an actual step-budget exhaustion is conservatively solid. A normal
+    // exit from the radial shell returned sky above; it is not an analytic
+    // planet-sphere fallback.
+    result.hit = true;
+    result.distance = travel;
+    result.normal = normalize(localOrigin + direction * travel);
+    result.tile = tile;
+    result.node = node;
+    result.flags = 1u;
+    atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) + 3u], 1u);
+    atomicAdd(systemAuthorityWords[systemTelemetryBase(planet) +
+        (forceExact ? 14u : 13u)], 1u);
+    return result;
+}
+
+bool systemRayMouth(vec3 origin, vec3 direction, vec3 center,
+                    vec3 forwardAxis, float radius, out float distance,
+                    out vec2 diskPosition) {
+    float denominator = dot(direction, forwardAxis);
+    if (abs(denominator) < 1e-5) return false;
+    distance = dot(center - origin, forwardAxis) / denominator;
+    if (distance <= 0.001) return false;
+    vec3 offset = origin + direction * distance - center;
+    vec3 reference = abs(forwardAxis.z) < 0.9 ? vec3(0.0, 0.0, 1.0)
+                                               : vec3(0.0, 1.0, 0.0);
+    vec3 rightAxis = normalize(cross(reference, forwardAxis));
+    vec3 upAxis = cross(forwardAxis, rightAxis);
+    diskPosition = vec2(dot(offset, rightAxis), dot(offset, upAxis));
+    return dot(diskPosition, diskPosition) <= radius * radius;
+}
+
+vec3 systemFrameToWorld(vec3 rightAxis, vec3 upAxis, vec3 forwardAxis,
+                        vec3 localValue) {
+    return rightAxis * localValue.x + upAxis * localValue.y +
+           forwardAxis * localValue.z;
+}
+
+vec3 systemWorldToFrame(vec3 rightAxis, vec3 upAxis, vec3 forwardAxis,
+                        vec3 worldValue) {
+    return vec3(dot(worldValue, rightAxis), dot(worldValue, upAxis),
+                dot(worldValue, forwardAxis));
+}
+
+bool systemTraverseNearestMouth(inout vec3 origin, inout vec3 direction,
+                                inout float rayJacobian,
+                                out float sourceDistance) {
+    float nearest = 1e30;
+    sourceDistance = 1e30;
+    uint selectedPlanet = 0u;
+    bool selectedOutgoing = false;
+    bool found = false;
+    for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+        for (uint end = 0u; end < 2u; ++end) {
+            bool outgoing = end == 0u;
+            vec3 mouthCenter;
+            vec3 mouthRight;
+            vec3 mouthUp;
+            vec3 mouthForward;
+            float mouthRadius;
+            systemMouthFrame(planet, outgoing, mouthCenter, mouthRight,
+                             mouthUp, mouthForward, mouthRadius);
+            float distance;
+            vec2 disk;
+            if (systemRayMouth(origin, direction, mouthCenter, mouthForward,
+                               mouthRadius * 0.88, distance, disk) &&
+                distance < nearest) {
+                nearest = distance;
+                selectedPlanet = planet;
+                selectedOutgoing = outgoing;
+                found = true;
+            }
+        }
+    }
+    if (!found) return false;
+    // All opaque planet/star bounds and all sixteen mouths share one
+    // front-to-back event decision. A mouth behind opaque terrain cannot steal
+    // the ray merely because the portal loop ran first.
+    for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+        vec3 opaqueCenter;
+        vec3 opaqueRadial;
+        vec3 opaqueTangent;
+        vec3 opaqueNormal;
+        float opaqueRadius;
+        systemPlanetState(planet, opaqueCenter, opaqueRadial, opaqueTangent,
+                          opaqueNormal, opaqueRadius);
+        float opaqueDistance;
+        if (systemRaySphere(origin, direction, opaqueCenter,
+                            opaqueRadius * frame.planetOuterScale * 1.04,
+                            opaqueDistance) && opaqueDistance < nearest) {
+            return false;
+        }
+    }
+    float opaqueStarDistance;
+    if (systemRaySphere(origin, direction, vec3(0.0), frame.systemStar.x,
+                        opaqueStarDistance) && opaqueStarDistance < nearest) {
+        return false;
+    }
+    uint destinationPlanet = selectedOutgoing
+        ? (selectedPlanet + 1u) % kSystemPlanetCount
+        : (selectedPlanet + 7u) % kSystemPlanetCount;
+    bool destinationOutgoing = !selectedOutgoing;
+    vec3 sourceCenter;
+    vec3 sourceRight;
+    vec3 sourceUp;
+    vec3 sourceForward;
+    float sourceRadius;
+    vec3 destinationCenter;
+    vec3 destinationRight;
+    vec3 destinationUp;
+    vec3 destinationForward;
+    float destinationRadius;
+    systemMouthFrame(selectedPlanet, selectedOutgoing, sourceCenter,
+                     sourceRight, sourceUp, sourceForward, sourceRadius);
+    systemMouthFrame(destinationPlanet, destinationOutgoing, destinationCenter,
+                     destinationRight, destinationUp, destinationForward,
+                     destinationRadius);
+    vec3 crossing = origin + direction * nearest;
+    vec3 localPosition = systemWorldToFrame(
+        sourceRight, sourceUp, sourceForward, crossing - sourceCenter);
+    vec3 localDirection = systemWorldToFrame(
+        sourceRight, sourceUp, sourceForward, direction);
+    sourceDistance = nearest;
+    origin = destinationCenter + systemFrameToWorld(
+        destinationRight, destinationUp, destinationForward, localPosition) +
+        destinationForward * 0.003;
+    direction = normalize(systemFrameToWorld(
+        destinationRight, destinationUp, destinationForward, localDirection));
+    float scaleRatio = destinationRadius / max(sourceRadius, 1e-7);
+    rayJacobian *= scaleRatio * scaleRatio;
+    return true;
+}
+
+vec2 systemHammersleyDisk(uint index, uint count) {
+    uint bits = index;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xaaaaaaaau) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xccccccccu) >> 2u);
+    bits = ((bits & 0x0f0f0f0fu) << 4u) | ((bits & 0xf0f0f0f0u) >> 4u);
+    bits = ((bits & 0x00ff00ffu) << 8u) | ((bits & 0xff00ff00u) >> 8u);
+    float radius = sqrt((float(index) + 0.5) / float(max(count, 1u)));
+    float angle = 2.0 * kPi * float(bits) / 4294967296.0;
+    return radius * vec2(cos(angle), sin(angle));
+}
+
+float systemStellarVisibilityQuality(vec3 position, vec3 normal,
+                                     uint ownerPlanet, uint qualityLimit) {
+    vec3 toStar = -position;
+    float starDistance = length(toStar);
+    vec3 starDirection = toStar / max(starDistance, 1e-6);
+    vec3 reference = abs(starDirection.z) < 0.9 ? vec3(0.0, 0.0, 1.0)
+                                                : vec3(0.0, 1.0, 0.0);
+    vec3 diskRight = normalize(cross(reference, starDirection));
+    vec3 diskUp = cross(starDirection, diskRight);
+    uint sampleCount = clamp(frame.systemControl.x, 1u,
+                             clamp(qualityLimit, 1u, 16u));
+    float visible = 0.0;
+    for (uint sampleIndex = 0u; sampleIndex < sampleCount; ++sampleIndex) {
+        vec2 disk = systemHammersleyDisk(sampleIndex, sampleCount);
+        vec3 target = diskRight * (disk.x * frame.systemStar.x) +
+                      diskUp * (disk.y * frame.systemStar.x);
+        vec3 sampleVector = target - position;
+        float sampleDistance = length(sampleVector);
+        vec3 sampleDirection = sampleVector / sampleDistance;
+        bool blocked = dot(normal, sampleDirection) <= 0.0;
+        for (uint planet = 0u; planet < kSystemPlanetCount && !blocked; ++planet) {
+            if (planet == ownerPlanet) continue;
+            vec3 center;
+            vec3 radial;
+            vec3 tangent;
+            vec3 orbitNormal;
+            float radius;
+            systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+            float blockerDistance;
+            blocked = systemRaySphere(position + normal * 0.002, sampleDirection,
+                                      center, radius * frame.planetOuterScale * 1.04,
+                                      blockerDistance) &&
+                      blockerDistance < sampleDistance;
+        }
+        visible += blocked ? 0.0 : 1.0;
+    }
+    return visible / float(sampleCount);
+}
+
+float systemStellarVisibility(vec3 position, vec3 normal, uint ownerPlanet) {
+    return systemStellarVisibilityQuality(position, normal, ownerPlanet, 16u);
+}
+
+vec3 systemMaterialColor(uint planet, uint material) {
+    vec3 paletteA = mix(vec3(0.08, 0.18, 0.12), vec3(0.18, 0.30, 0.52),
+                        float(planet) / 7.0);
+    vec3 paletteB = mix(vec3(0.48, 0.26, 0.10), vec3(0.34, 0.52, 0.18),
+                        fract(float(planet) * 0.37));
+    float selector = float((material * 73u + planet * 29u) & 255u) / 255.0;
+    return mix(paletteA, paletteB, smoothstep(0.22, 0.78, selector));
+}
+
+vec3 systemPlanetColor(uint planet, SystemTerrainHit hit, vec3 position) {
+    vec3 center;
+    vec3 radial;
+    vec3 tangent;
+    vec3 orbitNormal;
+    float radius;
+    systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+    vec3 surfaceDirection = normalize(position - center);
+    float boundary = 1.0;
+    bool pentagon = false;
+    float displayedWidth = 0.0;
+    uint displayedId = hit.node;
+    if (hit.tile != 0xffffffffu && hit.footprintPixels >= 1.0) {
+        GeodesicTile cell = geodesicTiles[hit.tile];
+        displayedWidth = geodesicTileSurfaceWidth(cell);
+        displayedId = hit.tile;
+        float ownerAlignment = dot(surfaceDirection, cell.center.xyz);
+        for (uint slot = 0u; slot < geodesicTileNeighborCount(cell); ++slot) {
+            uint neighbor = tileNeighbor(cell, slot);
+            boundary = min(boundary, ownerAlignment -
+                           dot(surfaceDirection,
+                               geodesicTiles[neighbor].center.xyz));
+        }
+        pentagon = geodesicTilePentagon(cell) != 0u;
+    } else {
+        vec3 nodeCenter = systemHierarchyCenter(hit.node);
+        displayedWidth = systemHierarchyWidth(hit.node);
+        float ownerAlignment = dot(surfaceDirection, nodeCenter);
+        uint count = systemHierarchyPentagon(hit.node) != 0u ? 5u : 6u;
+        for (uint slot = 0u; slot < count; ++slot) {
+            boundary = min(boundary, ownerAlignment - dot(
+                surfaceDirection,
+                systemHierarchyCenter(systemHierarchyNeighbor(hit.node, slot))));
+        }
+        pentagon = systemHierarchyPentagon(hit.node) != 0u;
+    }
+    float edgeWidth = max(displayedWidth * displayedWidth * 0.045, 2e-8);
+    float edge = 1.0 - smoothstep(0.0, edgeWidth, boundary);
+    vec3 aggregateAlbedo = systemMaterialColor(planet, hit.aggregateMaterial);
+    vec3 exactAlbedo = systemMaterialColor(planet, hit.exactMaterial);
+    vec3 albedo = mix(aggregateAlbedo, exactAlbedo, hit.morph);
+    if ((hit.flags & 1u) != 0u) albedo = mix(albedo, vec3(0.24), 0.35);
+    vec3 normal = normalize(hit.normal);
+    float visibility = systemStellarVisibility(position, normal, planet);
+    vec3 starDirection = normalize(-position);
+    float direct = max(dot(normal, starDirection), 0.0) * visibility;
+    vec3 color = albedo * (frame.systemAmbient.rgb * frame.systemAmbient.a +
+                           frame.systemStarColor.rgb * direct *
+                           frame.systemStar.y * 0.24);
+    if (frame.systemControl.y == 1u) {
+        color = mix(vec3(0.03, 0.08, 0.35), vec3(1.0, 0.18, 0.02),
+                    clamp(log2(max(hit.footprintPixels, 0.25)) / 8.0 + 0.25,
+                          0.0, 1.0));
+    } else if (frame.systemControl.y == 2u) {
+        float idHue = systemHash(displayedId * 0x9e3779b9u +
+                                 systemHierarchyLevel(hit.node) * 977u);
+        vec3 idColor = mix(vec3(0.04, 0.18, 0.42),
+                           vec3(0.12, 0.72, 0.38), idHue);
+        color = pentagon ? vec3(1.0, 0.05, 0.7)
+                         : mix(idColor, vec3(0.7, 0.9, 1.0), edge * 0.9);
+    } else if (frame.systemControl.y == 3u) {
+        color = vec3(visibility, visibility * visibility, 0.08);
+    } else if (frame.systemControl.y == 4u) {
+        color = (hit.flags & (2u | 32u)) != 0u
+            ? vec3(1.0, 0.04, 0.72)
+            : mix(vec3(0.025), color * 0.35, edge);
+    } else {
+        color = mix(color, vec3(0.012, 0.018, 0.026), edge * 0.72);
+    }
+    return color;
+}
+
+void systemCompositeMedia(vec3 origin, vec3 direction, float maximumDistance,
+                          inout vec3 radiance, inout float transmission) {
+    float segmentNear[8];
+    float segmentFar[8];
+    uint segmentPlanet[8];
+    uint count = 0u;
+    for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+        vec3 center;
+        vec3 radial;
+        vec3 tangent;
+        vec3 orbitNormal;
+        float radius;
+        systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+        float atmosphereHeight = uintBitsToFloat(
+            systemPlanetDescriptorWord(planet, 5u));
+        float nearDistance;
+        float farDistance;
+        if (systemRaySphereInterval(origin, direction, center,
+                radius * (frame.planetOuterScale + atmosphereHeight),
+                nearDistance, farDistance) && nearDistance < maximumDistance) {
+            segmentNear[count] = nearDistance;
+            segmentFar[count] = min(farDistance, maximumDistance);
+            segmentPlanet[count] = planet;
+            ++count;
+        }
+    }
+    for (uint index = 1u; index < count; ++index) {
+        float nearValue = segmentNear[index];
+        float farValue = segmentFar[index];
+        uint planetValue = segmentPlanet[index];
+        uint cursor = index;
+        while (cursor > 0u && segmentNear[cursor - 1u] > nearValue) {
+            segmentNear[cursor] = segmentNear[cursor - 1u];
+            segmentFar[cursor] = segmentFar[cursor - 1u];
+            segmentPlanet[cursor] = segmentPlanet[cursor - 1u];
+            --cursor;
+        }
+        segmentNear[cursor] = nearValue;
+        segmentFar[cursor] = farValue;
+        segmentPlanet[cursor] = planetValue;
+    }
+    for (uint index = 0u; index < count; ++index) {
+        if (!(transmission > 0.001) || segmentFar[index] <= segmentNear[index]) break;
+        uint planet = segmentPlanet[index];
+        vec3 center;
+        vec3 radial;
+        vec3 tangent;
+        vec3 orbitNormal;
+        float radius;
+        systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+        float pathLength = segmentFar[index] - segmentNear[index];
+        float density = uintBitsToFloat(systemPlanetDescriptorWord(planet, 4u));
+        float atmosphereAlpha = 1.0 - exp(-density * pathLength / max(radius, 1e-5));
+        vec3 samplePosition = origin + direction *
+            (0.5 * (segmentNear[index] + segmentFar[index]));
+        vec3 sampleNormal = normalize(samplePosition - center);
+        float phase = 0.35 + 0.65 * pow(max(dot(normalize(-samplePosition),
+                                                -direction), 0.0), 2.0);
+        vec3 atmosphereColor = mix(vec3(0.10, 0.28, 0.72),
+                                   vec3(0.72, 0.30, 0.12),
+                                   float(planet) / 7.0);
+        radiance += transmission * atmosphereColor * atmosphereAlpha * phase;
+        transmission *= 1.0 - atmosphereAlpha;
+
+        float cloudCoverage = uintBitsToFloat(
+            systemPlanetDescriptorWord(planet, 6u));
+        float cloudDensity = uintBitsToFloat(
+            systemPlanetDescriptorWord(planet, 7u));
+        float cloudNoise = systemHash(systemPlanetDescriptorWord(planet, 0u) ^
+            floatBitsToUint(dot(sampleNormal, vec3(37.1, 91.7, 53.3)) * 8192.0));
+        float cloudMask = smoothstep(1.0 - cloudCoverage, 1.0, cloudNoise);
+        if (cloudMask > 0.0) {
+            float cloudVisibility = systemStellarVisibilityQuality(
+                samplePosition, sampleNormal, planet, 4u);
+            float cloudAlpha = 1.0 - exp(-cloudDensity * cloudMask *
+                                          pathLength / max(radius * 0.05, 1e-5));
+            vec3 cloudColor = mix(vec3(0.12, 0.16, 0.22),
+                                  frame.systemStarColor.rgb,
+                                  0.28 + 0.52 * cloudVisibility);
+            radiance += transmission * cloudColor * cloudAlpha;
+            transmission *= 1.0 - cloudAlpha;
+        }
+    }
+}
+
+vec3 shadeEightPlanetSystem(vec3 origin, vec3 direction) {
+    vec3 sourceOrigin = origin;
+    vec3 sourceDirection = direction;
+    float rayJacobian = 1.0;
+    float sourceDistance;
+    bool traversed = systemTraverseNearestMouth(
+        origin, direction, rayJacobian, sourceDistance);
+    vec3 mediaRadiance = vec3(0.0);
+    float mediaTransmission = 1.0;
+    if (traversed) {
+        systemCompositeMedia(sourceOrigin, sourceDirection, sourceDistance,
+                             mediaRadiance, mediaTransmission);
+    }
+    float nearest = 1e30;
+    uint owner = 0xffffffffu;
+    SystemTerrainHit nearestTerrain;
+    nearestTerrain.hit = false;
+    for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+        SystemTerrainHit terrain = systemTraceTerrain(
+            planet, origin, direction, rayJacobian, false);
+        if (terrain.hit && terrain.distance < nearest) {
+            nearest = terrain.distance;
+            owner = planet;
+            nearestTerrain = terrain;
+        }
+    }
+    float starDistance = 1e30;
+    bool hitStar = systemRaySphere(origin, direction, vec3(0.0),
+                                   frame.systemStar.x, starDistance) &&
+                   starDistance < nearest;
+    bool differentialMismatch = false;
+    if (frame.visualizationMode == 107u) {
+        float referenceNearest = 1e30;
+        uint referenceOwner = 0xffffffffu;
+        SystemTerrainHit reference;
+        reference.hit = false;
+        for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+            SystemTerrainHit candidate = systemTraceTerrain(
+                planet, origin, direction, rayJacobian, true);
+            if (candidate.hit && candidate.distance < referenceNearest) {
+                referenceNearest = candidate.distance;
+                referenceOwner = planet;
+                reference = candidate;
+            }
+        }
+        uint telemetryPlanet = owner != 0xffffffffu ? owner :
+            (referenceOwner != 0xffffffffu ? referenceOwner : 0u);
+        uint telemetry = systemTelemetryBase(telemetryPlanet);
+        atomicAdd(systemAuthorityWords[telemetry + 9u], 1u);
+        if (owner != referenceOwner) {
+            float adaptiveFootprint = owner != 0xffffffffu ?
+                nearestTerrain.footprintPixels : 0.0;
+            float referenceFootprint = referenceOwner != 0xffffffffu ?
+                reference.footprintPixels : 0.0;
+            // Conservative aggregate coverage may differ from the finest
+            // silhouette only while the exact cell is subpixel. At/above one
+            // pixel the exact path owns coverage and any disagreement fails.
+            if (max(adaptiveFootprint, referenceFootprint) >= 1.0) {
+                atomicAdd(systemAuthorityWords[telemetry + 10u], 1u);
+                differentialMismatch = true;
+            }
+        } else if (owner != 0xffffffffu) {
+            uvec4 selectedAggregate = systemAggregate(owner, nearestTerrain.node);
+            uint materialMask = (selectedAggregate.z >> 8u) & 0x0fu;
+            float envelopeMinimum = uintBitsToFloat(selectedAggregate.x);
+            float envelopeMaximum = uintBitsToFloat(selectedAggregate.y);
+            uint selectedNeighborCount =
+                systemHierarchyPentagon(nearestTerrain.node) != 0u ? 5u : 6u;
+            for (uint slot = 0u; slot < selectedNeighborCount; ++slot) {
+                uint neighborNode = systemHierarchyNeighbor(nearestTerrain.node, slot);
+                uvec4 neighborAggregate = systemAggregate(owner, neighborNode);
+                materialMask |= (neighborAggregate.z >> 8u) & 0x0fu;
+                envelopeMinimum = min(envelopeMinimum,
+                                      uintBitsToFloat(neighborAggregate.x));
+                envelopeMaximum = max(envelopeMaximum,
+                                      uintBitsToFloat(neighborAggregate.y));
+                // A mixed-level boundary can enter the adjacent cell through
+                // either side of a pentagon fan. Include that deterministic
+                // two-ring envelope in both depth and material oracles.
+                uint secondRingCount =
+                    systemHierarchyPentagon(neighborNode) != 0u ? 5u : 6u;
+                for (uint secondSlot = 0u; secondSlot < secondRingCount; ++secondSlot) {
+                    uvec4 secondAggregate = systemAggregate(
+                        owner, systemHierarchyNeighbor(neighborNode, secondSlot));
+                    materialMask |= (secondAggregate.z >> 8u) & 0x0fu;
+                    envelopeMinimum = min(envelopeMinimum,
+                                          uintBitsToFloat(secondAggregate.x));
+                    envelopeMaximum = max(envelopeMaximum,
+                                          uintBitsToFloat(secondAggregate.y));
+                }
+            }
+            uint aggregateAncestor = nearestTerrain.node;
+            for (uint ancestorStep = 0u; ancestorStep < 3u &&
+                 systemHierarchyLevel(aggregateAncestor) > 0u;
+                 ++ancestorStep) {
+                aggregateAncestor = systemHierarchyParent(aggregateAncestor);
+                uvec4 parentAggregate = systemAggregate(owner, aggregateAncestor);
+                materialMask |= (parentAggregate.z >> 8u) & 0x0fu;
+                envelopeMinimum = min(envelopeMinimum,
+                                      uintBitsToFloat(parentAggregate.x));
+                envelopeMaximum = max(envelopeMaximum,
+                                      uintBitsToFloat(parentAggregate.y));
+            }
+            vec3 referenceCenter;
+            vec3 referenceRadial;
+            vec3 referenceTangent;
+            vec3 referenceOrbitNormal;
+            float referenceRadius;
+            systemPlanetState(owner, referenceCenter, referenceRadial,
+                              referenceTangent, referenceOrbitNormal,
+                              referenceRadius);
+            float radialDepth = uintBitsToFloat(systemAuthorityWords[21]) *
+                referenceRadius;
+            float aggregateError = max(uintBitsToFloat(selectedAggregate.w),
+                max(envelopeMaximum - envelopeMinimum, 0.0));
+            float boundaryWidth = systemHierarchyWidth(nearestTerrain.node) *
+                referenceRadius * (1.0 - nearestTerrain.morph);
+            // Convert the conservative radial/cell envelope into ray distance.
+            // The wider grazing clamp covers the two-ring uncertainty at
+            // pentagons and atlas ownership seams without relaxing exact-pixel
+            // coverage: footprints at or above one pixel already trace f512.
+            float incidence = max(abs(dot(normalize(nearestTerrain.normal),
+                                          direction)), 0.0125);
+            vec3 adaptiveDirection = normalize(
+                origin + direction * nearestTerrain.distance - referenceCenter);
+            vec3 exactDirection = normalize(
+                origin + direction * reference.distance - referenceCenter);
+            float patchDisplacement = length(adaptiveDirection - exactDirection);
+            float shellOuterRadius =
+                (uintBitsToFloat(systemAuthorityWords[20]) +
+                 uintBitsToFloat(systemAuthorityWords[21])) * referenceRadius;
+            // For two points in the same spherical shell, the triangle
+            // inequality bounds their separation by radial uncertainty plus
+            // outer-radius times angular chord displacement. Because both hit
+            // points lie on the same normalized ray, that separation is also
+            // their ray-depth difference. This makes the differential's
+            // accepted coarse error explicitly conservative at atlas seams.
+            float shellChordBound = radialDepth * aggregateError +
+                shellOuterRadius * patchDisplacement;
+            float tolerance = max(max(1e-5,
+                radialDepth * aggregateError + 5.0 * boundaryWidth +
+                referenceRadius * 3e-5) / incidence,
+                shellChordBound + referenceRadius * 3e-5);
+            bool sameSurfacePatch = patchDisplacement <=
+                systemHierarchyWidth(nearestTerrain.node) * 2.5;
+            bool exactPixelOwnership = nearestTerrain.footprintPixels >= 1.0;
+            if (abs(reference.distance - nearestTerrain.distance) > tolerance &&
+                (sameSurfacePatch || exactPixelOwnership)) {
+                atomicAdd(systemAuthorityWords[telemetry + 11u], 1u);
+                differentialMismatch = true;
+            }
+            uint referenceMaterialBit = 1u <<
+                ((max(reference.exactMaterial, 1u) - 1u) & 3u);
+            if ((materialMask & referenceMaterialBit) == 0u &&
+                (sameSurfacePatch || exactPixelOwnership)) {
+                atomicAdd(systemAuthorityWords[telemetry + 12u], 1u);
+                differentialMismatch = true;
+            }
+        }
+    }
+    vec3 color = vec3(0.0025, 0.004, 0.009) +
+        vec3(0.006, 0.009, 0.018) * pow(max(direction.z, 0.0), 2.0);
+    if (hitStar) {
+        vec3 starNormal = normalize(origin + direction * starDistance);
+        float limb = sqrt(max(dot(starNormal, -direction), 0.0));
+        color = frame.systemStarColor.rgb * frame.systemStar.y *
+                (0.72 + 0.28 * limb);
+    } else if (owner != 0xffffffffu) {
+        vec3 position = origin + direction * nearest;
+        color = systemPlanetColor(owner, nearestTerrain, position);
+    }
+    // Rings are evaluated after opaque ownership but only win when in front.
+    for (uint planet = 0u; planet < kSystemPlanetCount; ++planet) {
+        for (uint end = 0u; end < 2u; ++end) {
+            vec3 mouthCenter;
+            vec3 mouthRight;
+            vec3 mouthUp;
+            vec3 mouthForward;
+            float mouthRadius;
+            systemMouthFrame(planet, end == 0u, mouthCenter, mouthRight,
+                             mouthUp, mouthForward, mouthRadius);
+            float distance;
+            vec2 disk;
+            if (systemRayMouth(origin, direction, mouthCenter, mouthForward,
+                               mouthRadius * 1.12, distance, disk) &&
+                distance < min(nearest, starDistance)) {
+                float radialDistance = length(disk) / mouthRadius;
+                if (radialDistance > 0.88 && radialDistance < 1.12) {
+                    vec3 ringColor = end == 0u ? vec3(0.08, 0.8, 1.4)
+                                               : vec3(1.2, 0.18, 0.72);
+                    color = ringColor * (traversed ? 1.8 : 1.25);
+                }
+            }
+        }
+    }
+    systemCompositeMedia(origin, direction, min(nearest, starDistance),
+                         mediaRadiance, mediaTransmission);
+    color = mediaRadiance + mediaTransmission * color;
+    if (differentialMismatch) color = vec3(4.0, 0.0, 0.8);
+    if (any(isnan(color)) || any(isinf(color))) {
+        atomicAdd(systemAuthorityWords[systemTelemetryBase(0u) + 7u], 1u);
+        color = vec3(1.0, 0.0, 1.0);
+    }
+    color = color / (color + vec3(1.0));
+    return pow(color, vec3(1.0 / 2.2));
+}
+
+void buildSystemCamera(vec2 screen, out vec3 cameraPosition,
+                       out vec3 rayDirection) {
+    uint preset = frame.visualizationMode;
+    vec3 target = vec3(0.0);
+    vec3 upHint = vec3(0.0, 0.0, 1.0);
+    if (preset == 105u) {
+        uvec2 tile = min(gl_GlobalInvocationID.xy /
+            max(frame.resolution / uvec2(4u), uvec2(1u)), uvec2(3u));
+        uint endpoint = tile.x + tile.y * 4u;
+        uint planet = endpoint / 2u;
+        bool outgoing = (endpoint & 1u) == 0u;
+        vec3 mouthCenter;
+        vec3 mouthRight;
+        vec3 mouthUp;
+        vec3 mouthForward;
+        float mouthRadius;
+        systemMouthFrame(planet, outgoing, mouthCenter, mouthRight, mouthUp,
+                         mouthForward, mouthRadius);
+        target = mouthCenter;
+        cameraPosition = mouthCenter + mouthForward * (mouthRadius * 4.2);
+        upHint = mouthUp;
+        vec2 tileSize = vec2(frame.resolution) / 4.0;
+        vec2 tileUv = (mod(vec2(gl_GlobalInvocationID.xy), tileSize) + 0.5) /
+                      tileSize;
+        screen = tileUv * 2.0 - 1.0;
+        screen.y = -screen.y;
+        screen.x *= tileSize.x / tileSize.y;
+    } else if (preset == 102u || preset == 103u) {
+        uint planet = preset == 102u ? 2u : 4u;
+        vec3 center;
+        vec3 radial;
+        vec3 tangent;
+        vec3 orbitNormal;
+        float radius;
+        systemPlanetState(planet, center, radial, tangent, orbitNormal, radius);
+        target = center;
+        cameraPosition = center +
+            (preset == 103u ? tangent * 1.75 : radial * 3.2) * radius +
+            orbitNormal * (preset == 103u ? radius * 0.55 : 0.0);
+        upHint = orbitNormal;
+    } else if (preset == 104u) {
+        uint traversalPlanet = min((max(frame.streamSamplePhase, 1u) - 1u) /
+                                   12u, 7u);
+        vec3 mouthCenter;
+        vec3 mouthRight;
+        vec3 mouthUp;
+        vec3 mouthForward;
+        float mouthRadius;
+        systemMouthFrame(traversalPlanet, true, mouthCenter, mouthRight, mouthUp,
+                         mouthForward, mouthRadius);
+        target = mouthCenter;
+        cameraPosition = mouthCenter + mouthForward * (mouthRadius * 4.2);
+        upHint = mouthUp;
+    } else if (preset == 106u) {
+        vec3 center;
+        vec3 radial;
+        vec3 tangent;
+        vec3 orbitNormal;
+        float radius;
+        systemPlanetState(0u, center, radial, tangent, orbitNormal, radius);
+        target = center + radial * (radius * 0.96);
+        cameraPosition = center + radial * (radius * 1.62) +
+                         tangent * (radius * 0.06);
+        upHint = orbitNormal;
+    } else if (preset == 107u) {
+        vec3 mouthCenter;
+        vec3 mouthRight;
+        vec3 mouthUp;
+        vec3 mouthForward;
+        float mouthRadius;
+        systemMouthFrame(7u, true, mouthCenter, mouthRight, mouthUp,
+                         mouthForward, mouthRadius);
+        target = mouthCenter;
+        cameraPosition = mouthCenter + mouthForward * (mouthRadius * 3.4);
+        upHint = mouthUp;
+    } else {
+        cameraPosition = vec3(0.0, -43.0, 31.0);
+    }
+    vec3 forward = normalize(target - cameraPosition);
+    vec3 right = normalize(cross(forward, upHint));
+    vec3 up = normalize(cross(right, forward));
+    rayDirection = normalize(forward + screen.x * right + screen.y * up);
+}
+#endif
 
 bool raySphereInterval(vec3 origin, vec3 direction, float radius,
                        out float nearDistance, out float farDistance) {
@@ -5477,16 +6639,32 @@ void buildCameraFrame(out vec3 cameraPosition, out vec3 forward,
     if (frame.cameraMode == 2u) {
 #if VOXEL_INTRINSIC_PORTAL_LAB
 #if VOXEL_GLOBAL_METRIC_LAB
-        bool nativeEllis = intrinsicControl.x < -0.5;
+        bool sameExteriorHandle = intrinsicControl.x < -1.5;
+        bool nativeEllis = intrinsicControl.x < -0.5 &&
+                           !sameExteriorHandle;
+        bool intrinsicObserver = nativeEllis ||
+                                 (sameExteriorHandle && intrinsicControl.y > 0.5);
         // Native signed-l mode has no Euclidean mouth surface.  The packed
         // forward/up vectors are components of the observer tetrad and every
         // screen ray is integrated from the same intrinsic event.
-        cameraPosition = nativeEllis ? vec3(0.0)
-                                     : intrinsicCamera.xyz * frame.planetRadius;
-        forward = normalize(nativeEllis ? intrinsicForward.xyz
-                                        : intrinsicAngular.xyz);
-        vec3 requestedUp = normalize(nativeEllis ? intrinsicUp.xyz
-                                                 : intrinsicForward.xyz);
+        cameraPosition = intrinsicObserver
+            ? vec3(0.0) : intrinsicCamera.xyz * frame.planetRadius;
+        // A same-exterior handle observer launches rays in a canonical camera
+        // tetrad. traceGlobalHandleRay() maps that ray through the basis-free
+        // embedded forward/up packet. Previously these lanes held
+        // radial/e1/e2 components and were used directly here; the
+        // least-aligned-axis change in e1/e2 then flipped the entire screen
+        // even though the transported tetrad was continuous.
+        bool embeddedHandleObserver = sameExteriorHandle &&
+                                      intrinsicControl.y > 0.5;
+        forward = embeddedHandleObserver
+            ? vec3(0.0, 0.0, -1.0)
+            : normalize(nativeEllis ? intrinsicForward.xyz
+                                    : intrinsicAngular.xyz);
+        vec3 requestedUp = embeddedHandleObserver
+            ? vec3(0.0, 1.0, 0.0)
+            : normalize(nativeEllis ? intrinsicUp.xyz
+                                    : intrinsicForward.xyz);
         right = normalize(cross(forward, requestedUp));
         up = normalize(cross(right, forward));
 #else
@@ -6894,13 +8072,25 @@ void globalHandleLogConformal(vec3 position, out float value,
                               out vec3 gradient) {
     vec3 centers[2] = vec3[2](intrinsicEndpointA.xyz * frame.planetRadius,
                               intrinsicEndpointB.xyz * frame.planetRadius);
-    // The metric core and topology event share the physical throat radius.
-    // endpointA.w is a legacy content/camera standoff only; using it here
-    // created the large fixed-radius aperture visible in the global lab.
     float mouth = max(intrinsicEndpointB.w * frame.planetRadius, 1e-5);
-    float throat = mouth;
-    float tail = max(intrinsicControl.z * frame.planetRadius, mouth * 2.0);
-    float strength = clamp(intrinsicControl.w, 0.0, 4.0);
+    float throat = max(intrinsicControl.z * frame.planetRadius, 1e-5);
+    float tail = max(intrinsicUp.x * frame.planetRadius, mouth * 0.04);
+    float halfLength = throat * clamp(intrinsicUp.z, 0.20, 8.0);
+    float endRadius = sqrt(halfLength * halfLength + throat * throat);
+    float endDerivative = halfLength / max(endRadius, 1e-8);
+    float endSecond = throat * throat /
+        max(endRadius * endRadius * endRadius, 1e-10);
+    float boundaryOmega = endRadius / mouth;
+    float phi0 = log(boundaryOmega);
+    float phi1 = (endDerivative - 1.0) / mouth;
+    float phi2 = (boundaryOmega * endSecond - phi1) / mouth;
+    bool zeroBoundaryValue = abs(phi0) < 1e-4;
+    float safePhi0 = zeroBoundaryValue
+        ? (phi0 < 0.0 ? -1e-4 : 1e-4) : phi0;
+    float coefficientB = -phi1 / safePhi0;
+    float coefficientC = coefficientB * coefficientB -
+        phi2 / (2.0 * safePhi0);
+    float inverseTail4 = 1.0 / (tail * tail * tail * tail);
     vec3 radial[2];
     float s[2];
     float s4[2];
@@ -6911,21 +8101,37 @@ void globalHandleLogConformal(vec3 position, out float value,
         float radius = max(length(relative), 1e-8);
         radial[i] = relative / radius;
         float signedDistance = radius - mouth;
-        s[i] = abs(signedDistance);
+        s[i] = signedDistance;
         float s2 = s[i] * s[i];
         s4[i] = s2 * s2;
-        float denominator = s2 + throat * throat;
-        local[i] = strength * throat * throat / denominator;
-        localDerivative[i] = -2.0 * strength * throat * throat * s[i] /
-            max(denominator * denominator, 1e-20);
-        if (signedDistance < 0.0) localDerivative[i] *= -1.0;
+        float localDenominator = 1.0 + coefficientB * s[i] +
+            coefficientC * s[i] * s[i] + s4[i] * inverseTail4;
+        float localDenominatorDerivative = coefficientB +
+            2.0 * coefficientC * s[i] +
+            4.0 * s[i] * s[i] * s[i] * inverseTail4;
+        if (zeroBoundaryValue) {
+            float numerator = phi0 + phi1 * s[i] +
+                0.5 * phi2 * s[i] * s[i];
+            float numeratorDerivative = phi1 + phi2 * s[i];
+            float farDenominator = 1.0 + s4[i] * inverseTail4;
+            float farDerivative = 4.0 * s[i] * s[i] * s[i] * inverseTail4;
+            local[i] = numerator / farDenominator;
+            localDerivative[i] =
+                (numeratorDerivative * farDenominator -
+                 numerator * farDerivative) /
+                (farDenominator * farDenominator);
+        } else {
+            local[i] = phi0 / localDenominator;
+            localDerivative[i] = -phi0 * localDenominatorDerivative /
+                (localDenominator * localDenominator);
+        }
     }
     float tail2 = tail * tail;
     float tail4 = tail2 * tail2;
     float denominator = s4[0] * s4[1] +
         tail4 * (s4[0] + s4[1]);
     if (!(denominator > 1e-20)) {
-        value = strength;
+        value = phi0;
         gradient = vec3(0.0);
         return;
     }
@@ -7066,6 +8272,155 @@ bool globalHandleAdaptiveStep(vec3 position, vec3 direction,
     return true;
 }
 
+vec3 sameExteriorHandleRadialProfile(float signedU) {
+    float throat = max(intrinsicControl.z * frame.planetRadius, 1e-5);
+    float x = abs(signedU);
+    float exactR = sqrt(x * x + throat * throat);
+    float exactD = x / max(exactR, 1e-8);
+    float exactDD = throat * throat /
+        max(exactR * exactR * exactR, 1e-10);
+    return vec3(exactR, sign(signedU) * exactD, exactDD);
+}
+
+vec4 sameExteriorHandleDerivative(vec4 state) {
+    vec3 profile = sameExteriorHandleRadialProfile(state.x);
+    float radius = max(profile.x, 1e-6);
+    return vec4(state.z, state.w,
+                radius * profile.y * state.w * state.w,
+                -2.0 * profile.y / radius * state.z * state.w);
+}
+
+bool sameExteriorHandleTransit(
+    float startU, vec3 startN, vec3 localDirection,
+    out vec3 exteriorPosition, out vec3 exteriorDirection,
+    out uint destination, out float consumedDistance,
+    out uint usedSteps) {
+    float mouth = max(intrinsicEndpointB.w * frame.planetRadius, 1e-5);
+    float throat = max(intrinsicControl.z * frame.planetRadius, 1e-5);
+    float halfLength = throat * clamp(intrinsicUp.z, 0.20, 8.0);
+    vec3 n = normalize(startN);
+    vec3 e1;
+    vec3 e2;
+    intrinsicAngularBasis(n, e1, e2);
+    vec3 local = normalize(localDirection);
+    float tangentMagnitude = length(local.yz);
+    vec3 tangent = tangentMagnitude > 1e-7
+        ? normalize(e1 * local.y + e2 * local.z) : e1;
+    vec3 planeAxis = normalize(cross(n, tangent));
+    bool atPositiveBoundary = abs(startU - halfLength) <
+        max(frame.planetRadius * 2e-5, 1e-6);
+    bool atNegativeBoundary = abs(startU + halfLength) <
+        max(frame.planetRadius * 2e-5, 1e-6);
+    if ((atPositiveBoundary && local.x >= 0.0) ||
+        (atNegativeBoundary && local.x <= 0.0)) {
+        destination = atPositiveBoundary ? 0u : 1u;
+        vec3 contentN = destination == 0u ? n
+            : -intrinsicRotateEndB(n);
+        vec3 contentTangent = destination == 0u ? tangent
+            : -intrinsicRotateEndB(tangent);
+        float contentRadial = destination == 0u ? local.x : -local.x;
+        vec3 centers[2] = vec3[2](
+            intrinsicEndpointA.xyz * frame.planetRadius,
+            intrinsicEndpointB.xyz * frame.planetRadius);
+        float epsilon = max(mouth * 4.0 * 1.1920929e-7,
+                            frame.hitEpsilon * 0.01);
+        exteriorPosition = centers[destination] +
+            contentN * (mouth + epsilon);
+        exteriorDirection = normalize(contentN * contentRadial +
+                                       contentTangent * tangentMagnitude);
+        consumedDistance = 0.0;
+        usedSteps = 0u;
+        return true;
+    }
+    vec3 startProfile = sameExteriorHandleRadialProfile(startU);
+    float impact = startProfile.x * tangentMagnitude;
+    // Only the measure-zero critical geodesic has no finite exit.  Earlier
+    // code snapped a full two-pixel band to two representative rays, erasing
+    // the real high-order lensing and making the throat look like a hard
+    // surface. Keep only a float/ULP-sized half-open owner here; finite
+    // near-critical rays are integrated and spatial AA resolves coverage.
+    float impactBand = max(throat * 2e-5,
+        startProfile.x * 16.0 * 1.1920929e-7);
+    if (abs(impact - throat) < impactBand * 0.5) {
+        float ownedSide = impact <= throat ? -1.0 : 1.0;
+        impact = max(throat + ownedSide * impactBand * 0.5, 0.0);
+        tangentMagnitude = clamp(impact / max(startProfile.x, 1e-8),
+                                 0.0, 0.999999);
+        float radialSign = local.x < 0.0 ? -1.0 : 1.0;
+        local.x = radialSign * sqrt(max(
+            1.0 - tangentMagnitude * tangentMagnitude, 0.0));
+    }
+    vec4 state = vec4(startU, 0.0, local.x,
+                      tangentMagnitude / max(startProfile.x, 1e-8));
+    // Short collars have a much steeper but still C2 radial jet. Bound the
+    // integration step by intrinsic proper length as well as throat radius;
+    // otherwise a single RK step can span most of the very-short preset and
+    // visibly lurch the camera/ray family.
+    float baseStep = max(min(throat * 0.018, halfLength * 0.010),
+                         frame.planetRadius * 0.000025);
+    consumedDistance = 0.0;
+    usedSteps = 0u;
+    bool startedAtBoundary = abs(abs(startU) - halfLength) <
+        max(frame.planetRadius * 2e-5, 1e-6);
+    // Pixel-footprint-owned rays immediately adjacent to the Ellis
+    // separatrix can spend substantially longer in the throat than a radial
+    // crossing.  Keep this rare path bounded, but large enough that a valid
+    // family is never converted to background by an implementation budget.
+    for (uint step = 0u; step < 4096u; ++step) {
+        float h = baseStep;
+        float radial = state.z;
+        if (radial > 1e-7) {
+            float eventDistance = (halfLength - state.x) / radial;
+            if (eventDistance > 1e-7) h = min(h, eventDistance);
+        } else if (radial < -1e-7) {
+            float eventDistance = (-halfLength - state.x) / radial;
+            if (eventDistance > 1e-7) h = min(h, eventDistance);
+        }
+        vec4 k1 = sameExteriorHandleDerivative(state);
+        vec4 k2 = sameExteriorHandleDerivative(state + k1 * (0.5 * h));
+        vec4 k3 = sameExteriorHandleDerivative(state + k2 * (0.5 * h));
+        vec4 k4 = sameExteriorHandleDerivative(state + k3 * h);
+        state += (k1 + 2.0 * k2 + 2.0 * k3 + k4) * (h / 6.0);
+        consumedDistance += h;
+        usedSteps = step + 1u;
+        if (any(isnan(state)) || any(isinf(state))) return false;
+        bool exitsPositive = state.x >= halfLength - 2e-6 && state.z > 0.0;
+        bool exitsNegative = state.x <= -halfLength + 2e-6 && state.z < 0.0;
+        if ((exitsPositive || exitsNegative) &&
+            (!startedAtBoundary || step > 0u)) {
+            destination = exitsPositive ? 0u : 1u;
+            state.x = exitsPositive ? halfLength : -halfLength;
+            vec3 exitN = normalize(intrinsicRotateAxis(
+                n, planeAxis, state.y));
+            vec3 exitTangent = normalize(intrinsicRotateAxis(
+                tangent, planeAxis, state.y));
+            vec3 exitProfile = sameExteriorHandleRadialProfile(state.x);
+            float tangentSpeed = clamp(abs(state.w) * exitProfile.x,
+                                       0.0, 0.999999);
+            float radialSpeed = sqrt(max(1.0 -
+                tangentSpeed * tangentSpeed, 0.0));
+            float handleRadial = exitsPositive ? radialSpeed : -radialSpeed;
+            float contentRadial = destination == 0u
+                ? handleRadial : -handleRadial;
+            vec3 contentN = destination == 0u ? exitN
+                : -intrinsicRotateEndB(exitN);
+            vec3 contentTangent = destination == 0u ? exitTangent
+                : -intrinsicRotateEndB(exitTangent);
+            vec3 centers[2] = vec3[2](
+                intrinsicEndpointA.xyz * frame.planetRadius,
+                intrinsicEndpointB.xyz * frame.planetRadius);
+            float epsilon = max(mouth * 4.0 * 1.1920929e-7,
+                                frame.hitEpsilon * 0.01);
+            exteriorPosition = centers[destination] +
+                contentN * (mouth + epsilon);
+            exteriorDirection = normalize(
+                contentN * contentRadial + contentTangent * tangentSpeed);
+            return true;
+        }
+    }
+    return false;
+}
+
 void recordGlobalContentInterval(vec3 entryPosition, vec3 entryDirection,
                                  float contentOuter) {
     float segmentNear = 0.0;
@@ -7096,11 +8451,27 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
     vec3 centers[2] = vec3[2](intrinsicEndpointA.xyz * frame.planetRadius,
                               intrinsicEndpointB.xyz * frame.planetRadius);
     float mouth = max(intrinsicEndpointB.w * frame.planetRadius, 1e-5);
-    vec3 position = intrinsicCamera.xyz * frame.planetRadius;
+    bool observerInsideHandle = intrinsicControl.x < -1.5 &&
+                                intrinsicControl.y > 0.5;
+    vec3 position = observerInsideHandle ? vec3(0.0)
+        : intrinsicCamera.xyz * frame.planetRadius;
     vec3 direction = normalize(worldDirection);
     IntrinsicEllisRayState result = IntrinsicEllisRayState(
         position, direction, 2u, 0u, 1u, true);
     globalHandlePathActive = 1u;
+
+    // Lab-only semantic reference: retain the exact same observer pose, FOV,
+    // terrain, media and star renderer, but bypass every handle metric/chart
+    // event. This makes before/after planet masks comparable pixel-for-pixel;
+    // disabling the intrinsic renderer would instead select another camera.
+    if (intrinsicUp.w > 11.5 && !observerInsideHandle) {
+        result.endIndex = 0u;
+        result.pathClass = 0u;
+        globalMetricMappedFinite = 1u;
+        globalCurvedSelected = 1u;
+        intrinsicPathMaxCurvature = 0.0;
+        return result;
+    }
 
     // The planet-centred shell is only a conservative content-query bound.
     // It records a local exact-DDA/media interval, but never terminates or
@@ -7108,20 +8479,72 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
     // at its current position; outside observers record it at the actual
     // integrated entry event below.
     float contentOuter = frame.planetRadius * (frame.planetOuterScale + 0.30);
-    if (length(position) < contentOuter) {
+    float remaining = frame.planetRadius * 3.5;
+    if (observerInsideHandle) {
+        // intrinsicAngular/intrinsicForward carry the transported handle
+        // forward/up as basis-free embedded tangents. Convert the canonical
+        // screen ray into that tetrad, then into the radial/e1/e2 form used by
+        // the intrinsic solver. Any e1/e2 reference-axis switch cancels
+        // within this conversion and cannot rotate the view.
+        vec3 observerN = normalize(intrinsicCamera.xyz);
+        vec3 embeddedForward = normalize(intrinsicAngular.xyz);
+        vec3 embeddedUp = normalize(intrinsicForward.xyz - embeddedForward *
+                                    dot(intrinsicForward.xyz,
+                                        embeddedForward));
+        vec3 embeddedRight = normalize(cross(embeddedForward, embeddedUp));
+        vec3 embeddedDirection = normalize(
+            embeddedRight * direction.x + embeddedUp * direction.y -
+            embeddedForward * direction.z);
+        vec3 observerE1;
+        vec3 observerE2;
+        intrinsicAngularBasis(observerN, observerE1, observerE2);
+        direction = normalize(vec3(
+            dot(embeddedDirection, observerN),
+            dot(embeddedDirection, observerE1),
+            dot(embeddedDirection, observerE2)));
+        vec3 exitPosition;
+        vec3 exitDirection;
+        uint destination;
+        float handleDistance;
+        uint handleSteps;
+        if (!sameExteriorHandleTransit(
+                intrinsicCamera.w * frame.planetRadius,
+                normalize(intrinsicCamera.xyz), direction,
+                exitPosition, exitDirection, destination,
+                handleDistance, handleSteps)) {
+            result.finiteState = false;
+            globalMetricBudgetExhausted = 1u;
+            return result;
+        }
+        position = exitPosition;
+        direction = exitDirection;
+        result.endIndex = destination;
+        result.pathClass = 2u;
+        result.steps += handleSteps;
+        remaining = max(remaining - handleDistance, 0.0);
+    }
+    if (observerInsideHandle && length(position) < contentOuter) {
+        // The camera ray has just emerged directly into the destination
+        // content-query volume.  This state is already the continuous handle
+        // exit; advancing a full global affine budget from here would pass
+        // through the planet before exact DDA was invoked.
+        remaining = 0.0;
+        globalContentShellCrossing = 1u;
+    } else if (length(position) < contentOuter) {
         recordGlobalContentInterval(position, direction, contentOuter);
     }
-
-    float remaining = frame.planetRadius * 3.5;
     float observerPathDistance = 0.0;
-    uint lastMouth = uint(clamp(intrinsicControl.x, 0.0, 2.0));
+    uint lastMouth = observerInsideHandle ? result.endIndex : 2u;
     float accumulatedCurvature = 0.0;
     // Near the throat the old 72-step cap could end a perfectly finite ray
     // before it reached either content or the full affine budget. Those rays
     // were then shaded as sky, producing the all-screen jump in the recorded
     // camera crossing. The adaptive solver remains bounded, but its budget is
     // now sufficient for the worst certified near-throat path.
-    for (uint step = 0u; step < 256u && remaining > 1e-5; ++step) {
+    // Ordinary curvature steps are at least 0.008 R. Exact event bracketing
+    // below is activated only for an actually inward/intersecting local ray,
+    // so tangent misses cannot consume the budget in an asymptotic series.
+    for (uint step = 0u; step < 512u && remaining > 1e-5; ++step) {
         float phi;
         vec3 gradient;
         globalHandleLogConformal(position, phi, gradient);
@@ -7142,10 +8565,16 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
                 length(position - centers[endpoint]) < mouth * 1.10) {
                 continue;
             }
-            float surfaceDistance = abs(
-                length(position - centers[endpoint]) - mouth);
-            requestedStep = min(requestedStep, max(
-                surfaceDistance * 0.45, frame.planetRadius * 0.0015));
+            vec3 mouthRelative = position - centers[endpoint];
+            float inwardProjection = -dot(direction, mouthRelative);
+            float localDiscriminant = inwardProjection * inwardProjection -
+                (dot(mouthRelative, mouthRelative) - mouth * mouth);
+            if (inwardProjection > 0.0 && localDiscriminant >= 0.0) {
+                float surfaceDistance = abs(length(mouthRelative) - mouth);
+                requestedStep = min(requestedStep, max(
+                    surfaceDistance * 0.45,
+                    frame.planetRadius * 0.0015));
+            }
         }
         vec3 candidate;
         vec3 candidateDirection;
@@ -7187,7 +8616,14 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
         }
         float contentFraction = 2.0;
         float possibleContentFraction = 0.0;
-        bool entersContent = globalObserverSegmentValid == 0u &&
+        // A source-side interval and a destination-side interval are distinct
+        // ordered segments.  The old single-boolean guard suppressed the
+        // destination event whenever the observer segment had already been
+        // recorded; crossed rays then integrated through the planet and began
+        // exact DDA behind its entry surface.  A completed handle path must
+        // always detect its first destination content-query overlap.
+        bool entersContent =
+            (result.pathClass == 2u || globalObserverSegmentValid == 0u) &&
             length(position) > contentOuter &&
             globalHandleSegmentEntry(position, candidate, vec3(0.0),
                                      contentOuter,
@@ -7203,6 +8639,20 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
             vec3 entryPosition = mix(position, candidate, contentFraction);
             vec3 entryDirection = normalize(mix(
                 direction, candidateDirection, contentFraction));
+            if (result.pathClass == 2u) {
+                // This is the destination content-chart overlap after a real
+                // handle traversal. Hand exact terrain/media the continuous
+                // geodesic event state before the solver can advance beyond
+                // the planet. The shell is a query handoff only: it does not
+                // choose a ray family, mouth, radiance owner, or reset the
+                // transported direction/Jacobian.
+                position = entryPosition;
+                direction = entryDirection;
+                remaining = 0.0;
+                globalContentShellCrossing = 1u;
+                ++result.steps;
+                break;
+            }
             recordGlobalContentInterval(
                 entryPosition, entryDirection, contentOuter);
         }
@@ -7216,24 +8666,56 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
             globalObserverMouthIndex = source;
             position = mix(position, candidate, bestFraction);
             vec3 sourceN = normalize(position - centers[source]);
-            uint destination = 1u - source;
-            vec3 destinationN = normalize(globalHandleRotateAcross(
-                -sourceN, source));
-            float epsilon = max(mouth * (4.0 * 1.1920929e-7),
-                                frame.hitEpsilon * 0.01);
-            position = centers[destination] + destinationN *
-                (mouth + epsilon);
-            direction = normalize(globalHandleRotateAcross(
-                normalize(mix(direction, candidateDirection, bestFraction)),
-                source));
+            vec3 entryDirection = normalize(mix(
+                direction, candidateDirection, bestFraction));
+            vec3 intrinsicN = source == 0u ? sourceN
+                : normalize(-intrinsicRotateEndBInverse(sourceN));
+            vec3 intrinsicDirection = source == 0u ? entryDirection
+                : intrinsicRotateEndBInverse(entryDirection);
+            float contentRadial = dot(intrinsicDirection, intrinsicN);
+            vec3 tangentVector = intrinsicDirection -
+                intrinsicN * contentRadial;
+            if (source == 1u) tangentVector = -tangentVector;
+            vec3 e1;
+            vec3 e2;
+            intrinsicAngularBasis(intrinsicN, e1, e2);
+            vec3 localDirection = normalize(vec3(
+                contentRadial,
+                dot(tangentVector, e1), dot(tangentVector, e2)));
+            float throat = max(intrinsicControl.z * frame.planetRadius, 1e-5);
+            float halfLength = throat * clamp(intrinsicUp.z, 0.20, 8.0);
+            vec3 exitPosition;
+            vec3 exitDirection;
+            uint destination;
+            float handleDistance;
+            uint handleSteps;
+            if (!sameExteriorHandleTransit(
+                    source == 0u ? halfLength : -halfLength,
+                    intrinsicN, localDirection,
+                    exitPosition, exitDirection, destination,
+                    handleDistance, handleSteps)) {
+                result.finiteState = false;
+                globalMetricBudgetExhausted = 1u;
+                return result;
+            }
+            position = exitPosition;
+            direction = exitDirection;
             lastMouth = destination;
             result.endIndex = destination;
             result.pathClass = 2u;
             float consumedProperStep = properStep * bestFraction;
             accumulatedCurvature += curvature * consumedProperStep;
-            remaining -= consumedProperStep;
+            remaining -= min(remaining, consumedProperStep + handleDistance);
             observerPathDistance += euclideanStep * bestFraction;
-            ++result.steps;
+            result.steps += 1u + handleSteps;
+            if (length(position) < contentOuter) {
+                // A mouth can lie inside the conservative planet query bound.
+                // In that case there is no later sphere-entry event to catch:
+                // hand this exact post-handle state to DDA immediately.
+                remaining = 0.0;
+                globalContentShellCrossing = 1u;
+                break;
+            }
             // Continue the unconsumed part of this affine step from the
             // destination chart. Dropping it made camera and rays accumulate
             // different depth precisely on the body crossing frame.
@@ -7287,7 +8769,7 @@ IntrinsicEllisRayState traceGlobalHandleRay(vec3 worldDirection) {
 
 IntrinsicEllisRayState traceIntrinsicEllisRay(vec3 localDirection) {
 #if VOXEL_GLOBAL_METRIC_LAB
-    if (intrinsicControl.x < -0.5) {
+    if (intrinsicControl.x < -0.5 && intrinsicControl.x > -1.5) {
         IntrinsicEllisRayState nativeRay = traceIntrinsicEllisCoreRay(
             intrinsicCamera.x, intrinsicAngular.xyz, localDirection);
         globalHandlePathActive = 1u;
@@ -7465,7 +8947,8 @@ bool enqueueGlobalSpatialAaCandidate(uvec2 pixel, vec2 screen,
                                      vec3 forward, vec3 right, vec3 up,
                                      vec3 mappedOrigin,
                                      vec3 mappedDirection) {
-    uint debugMode = uint(clamp(intrinsicUp.w, 0.0, 10.0));
+    uint debugMode = intrinsicUp.w > 11.5
+        ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
     bool enabled = intrinsicEndpointA.w > 0.5;
     bool sampledTelemetry = (pixel.x & 3u) == 0u &&
                             (pixel.y & 3u) == 0u;
@@ -7725,7 +9208,8 @@ vec3 renderGlobalMetricAdaptivePixel(
     vec3 centerWorldDirection = normalize(
         forward + screen.x * right + screen.y * up);
     overwritePixel = true;
-    uint debugMode = uint(clamp(intrinsicUp.w, 0.0, 10.0));
+    uint debugMode = intrinsicUp.w > 11.5
+        ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
     float distortionThreshold = max(intrinsicAngular.w, 1.01);
     float magnificationThreshold = max(intrinsicEndBRotation.w, 1.01);
     float basePixel = 2.0 / max(float(frame.resolution.y), 1.0);
@@ -7948,7 +9432,8 @@ vec3 resolveGlobalMetricAaPixel(uint recordIndex, uvec2 pixel,
         atomicAdd(scaleDdaHistogram[8], useFourSamples ? 4u : 0u);
         atomicAdd(scaleDdaHistogram[9], useFourSamples ? 0u : 1u);
     }
-    uint debugMode = uint(clamp(intrinsicUp.w, 0.0, 10.0));
+    uint debugMode = intrinsicUp.w > 11.5
+        ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
     overwritePixel = useFourSamples || debugMode >= 7u;
     if (debugMode == 7u) {
         return useFourSamples ? vec3(0.12, 0.95, 0.32)
@@ -8045,7 +9530,8 @@ void main() {
         atomicExchange(scaleAtlasHistogram[15], floatBitsToUint(color.y));
         atomicExchange(scaleAtlasHistogram[16], floatBitsToUint(color.z));
     }
-    uint debugMode = uint(clamp(intrinsicUp.w, 0.0, 10.0));
+    uint debugMode = intrinsicUp.w > 11.5
+        ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
     if (debugMode < 7u) {
         color = color / (color + vec3(1.0));
         color = pow(color, vec3(1.0 / 2.2));
@@ -8122,23 +9608,44 @@ void main() {
     screen.y = -screen.y;
     screen.x *= float(frame.resolution.x) / float(frame.resolution.y);
 
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    vec3 systemCameraPosition;
+    vec3 systemRayDirection;
+    buildSystemCamera(screen, systemCameraPosition, systemRayDirection);
+    imageStore(outputImage, ivec2(pixel),
+               vec4(shadeEightPlanetSystem(systemCameraPosition,
+                                           systemRayDirection), 1.0));
+    return;
+#endif
+
     vec3 cameraPosition;
     vec3 forward;
     vec3 right;
     vec3 up;
     buildCameraFrame(cameraPosition, forward, right, up);
     vec3 rayDirection = normalize(forward + screen.x * right + screen.y * up);
+    vec3 unmappedRayDirection = rayDirection;
     backgroundEnvironmentDirection = normalize(
         vec3(screen.x, screen.y, 1.0));
 
 #if VOXEL_INTRINSIC_PORTAL_LAB
-    if (frame.cameraMode == 2u && intrinsicCamera.w > 0.5) {
+    // In the original intrinsic lab camera.w was an enable bit.  The
+    // same-exterior atlas packs signed handle proper depth there, including
+    // zero and negative values, while intrinsicControl.x is the explicit path
+    // discriminator.  Keeping the obsolete >0.5 test skipped manifold tracing
+    // and launched primary DDA from buildCameraFrame's local origin (the
+    // planet centre), yielding the full-screen magenta closed-shell failure.
+    bool intrinsicPathEnabled = intrinsicCamera.w > 0.5;
+#if VOXEL_GLOBAL_METRIC_LAB
+    intrinsicPathEnabled = intrinsicControl.x < -0.5;
+#endif
+    if (frame.cameraMode == 2u && intrinsicPathEnabled) {
         intrinsicPathMaxCurvature = 0.0;
         IntrinsicEllisRayState intrinsicRay = traceIntrinsicEllisRay(rayDirection);
         cameraPosition = intrinsicRay.origin;
         rayDirection = intrinsicRay.direction;
         backgroundEnvironmentDirection = rayDirection;
-        uint intrinsicDebugMode = uint(clamp(intrinsicUp.w, 0.0, 11.0));
+        uint intrinsicDebugMode = uint(clamp(intrinsicUp.w, 0.0, 12.0));
         if (intrinsicDebugMode == 11u) {
             vec3 shellDebug = globalContentShellCrossing != 0u
                 ? vec3(0.08, 0.82, 1.0)
@@ -8174,10 +9681,15 @@ void main() {
                     ? vec3(1.00, 0.62, 0.08)
                     : vec3(1.00, 0.00, 0.80);
             } else {
-                float curvature = clamp(log2(1.0 +
-                    intrinsicPathMaxCurvature) / 6.0, 0.0, 1.0);
-                debugColor = mix(vec3(0.015, 0.025, 0.045),
-                                 vec3(1.0, 0.32, 0.04), curvature);
+                float bending = acos(clamp(dot(
+                    normalize(unmappedRayDirection),
+                    normalize(intrinsicRay.direction)), -1.0, 1.0));
+                float heat = smoothstep(radians(1.0), radians(10.0), bending);
+                debugColor = heat < 0.5
+                    ? mix(vec3(0.015, 0.025, 0.045),
+                          vec3(1.0, 0.62, 0.05), heat * 2.0)
+                    : mix(vec3(1.0, 0.62, 0.05),
+                          vec3(1.0, 0.02, 0.01), (heat - 0.5) * 2.0);
             }
             imageStore(outputImage, ivec2(pixel), vec4(debugColor, 1.0));
             return;
@@ -8305,6 +9817,13 @@ void main() {
         } else {
             globalCurvedSelected = globalHandlePathActive != 0u ||
                 globalObserverMouthIndex < 2u ? 1u : 0u;
+            // The observer broad-phase probe above is deliberately allowed
+            // to miss.  Do not leave its interval/candidate state attached to
+            // the curved destination query: the legacy closed-shell audit
+            // would then test the destination origin using the source
+            // segment's interval and report millions of fictitious misses.
+            globalMetricTerrainInterval = 0u;
+            globalMetricDdaCandidate = 0u;
             color = shadeGeodesicPlanet(
                 cameraPosition, rayDirection,
                 hitPlanet, hitClass, debugHit);
@@ -8672,7 +10191,8 @@ void main() {
         bool aaQueued = enqueueGlobalSpatialAaCandidate(
             pixel, screen, forward, right, up,
             cameraPosition, rayDirection);
-        uint aaDebugMode = uint(clamp(intrinsicUp.w, 0.0, 10.0));
+        uint aaDebugMode = intrinsicUp.w > 11.5
+            ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
         if (aaDebugMode >= 7u && !aaQueued) {
             color = aaDebugMode == 7u ? vec3(0.02, 0.08, 0.16)
                   : aaDebugMode == 8u ? vec3(0.08, 0.22, 0.08)
@@ -8686,7 +10206,9 @@ void main() {
             cameraPosition, rayDirection);
 #endif
 #if VOXEL_GLOBAL_METRIC_LAB
-        if (uint(clamp(intrinsicUp.w, 0.0, 10.0)) < 7u) {
+        uint aaToneDebugMode = intrinsicUp.w > 11.5
+            ? 0u : uint(clamp(intrinsicUp.w, 0.0, 10.0));
+        if (aaToneDebugMode < 7u) {
             color = color / (color + vec3(1.0));
             color = pow(color, vec3(1.0 / 2.2));
         }

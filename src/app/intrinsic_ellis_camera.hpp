@@ -85,8 +85,23 @@ public:
                 return value * cosine + portalCross(axis, value) * sine +
                     axis * (portalDot(axis, value) * (1.0F - cosine));
             };
-            PortalVector forward = globalState_.forward;
-            PortalVector up = globalState_.up;
+            // The handle chart owns an intrinsic orthonormal tetrad.  The
+            // exterior forward/up members are only a controller/UI mirror
+            // while chart == 1; rotating that mirror used to be discarded as
+            // soon as movement or render synchronization republished the
+            // transported handleFrame.  Apply look in the authoritative
+            // local tetrad at every signed handle depth instead.
+            const bool insideHandle = globalState_.chart == 1U;
+            const PortalVector angularPosition =
+                globalState_.handleState.angularPosition;
+            PortalVector forward = insideHandle
+                ? ellisTangentToEmbedded(globalState_.handleFrame.forward,
+                                         angularPosition)
+                : globalState_.forward;
+            PortalVector up = insideHandle
+                ? ellisTangentToEmbedded(globalState_.handleFrame.up,
+                                         angularPosition)
+                : globalState_.up;
             PortalVector right = portalNormalize(portalCross(forward, up),
                                                   {1.0F, 0.0F, 0.0F});
             forward = portalNormalize(rotateAxis(forward, up, yawRadians),
@@ -96,8 +111,24 @@ public:
                                       forward);
             up = portalNormalize(rotateAxis(up, right, pitchRadians), up);
             up = portalNormalize(rotateAxis(up, forward, rollRadians), up);
-            globalState_.forward = forward;
-            globalState_.up = portalOrthonormalUp(forward, up);
+            right = portalNormalize(portalCross(forward, up), right);
+            up = portalNormalize(portalCross(right, forward), up);
+            if (insideHandle) {
+                globalState_.handleFrame.forward = ellisTangentFromEmbedded(
+                    forward, angularPosition);
+                globalState_.handleFrame.right = ellisTangentFromEmbedded(
+                    right, angularPosition);
+                globalState_.handleFrame.up = ellisTangentFromEmbedded(
+                    up, angularPosition);
+                orthonormalizeGlobalHandleFrame();
+                forward = ellisTangentToEmbedded(
+                    globalState_.handleFrame.forward, angularPosition);
+                up = ellisTangentToEmbedded(
+                    globalState_.handleFrame.up, angularPosition);
+            }
+            globalState_.forward = portalNormalize(forward,
+                                                   globalState_.forward);
+            globalState_.up = portalOrthonormalUp(globalState_.forward, up);
             return;
         }
         PortalVector forward = ellisTangentToLocal(
@@ -271,6 +302,10 @@ public:
         if (lastMoveRejected_) {
             return MotionStatus::RejectedNonFinite;
         }
+        if (globalMode_) {
+            if (globalState_.chart == 1U) return MotionStatus::IntrinsicCore;
+            return MotionStatus::PositiveAsymptoticContent;
+        }
         if (state_.properDepth > settings.contentExitProperDepth) {
             return MotionStatus::PositiveAsymptoticContent;
         }
@@ -283,13 +318,15 @@ public:
         const IntrinsicEllisSettings& settings) const noexcept {
         switch (motionStatus(settings)) {
         case MotionStatus::PositiveAsymptoticContent:
-            return "+end all-space Ellis asymptote (unclamped)";
+            return globalMode_ ? "shared exterior chart (unclamped)"
+                               : "+end all-space Ellis asymptote (unclamped)";
         case MotionStatus::NegativeAsymptoticContent:
             return "-end all-space Ellis asymptote (unclamped)";
         case MotionStatus::RejectedNonFinite:
             return "movement rejected: non-finite safety guard";
         default:
-            return "intrinsic Ellis core (unclamped)";
+            return globalMode_ ? "same-exterior handle collar/core"
+                               : "intrinsic Ellis core (unclamped)";
         }
     }
     [[nodiscard]] int lastEnteredMouth() const noexcept {
@@ -301,6 +338,17 @@ public:
     }
 
 private:
+    void orthonormalizeGlobalHandleFrame() noexcept {
+        auto& frame = globalState_.handleFrame;
+        const PortalVector angularPosition =
+            globalState_.handleState.angularPosition;
+        if (!globalHandleOrthonormalizeFrame(
+                frame, angularPosition,
+                globalState_.handleState.velocity)) {
+            globalState_.finite = false;
+        }
+    }
+
     void orthonormalizeFrame() noexcept {
         frame_.forward = ellisNormalize(frame_.forward,
                                         state_.angularPosition,

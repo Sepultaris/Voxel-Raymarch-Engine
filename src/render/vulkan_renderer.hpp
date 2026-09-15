@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,7 +20,8 @@ namespace voxel {
 
 class VulkanRenderer final {
 public:
-    explicit VulkanRenderer(SDL_Window* window, bool forceTopologyRegeneration = false);
+    explicit VulkanRenderer(SDL_Window* window, bool forceTopologyRegeneration = false,
+                            bool headlessCapture = false);
     ~VulkanRenderer();
 
     VulkanRenderer(const VulkanRenderer&) = delete;
@@ -27,6 +29,8 @@ public:
 
     [[nodiscard]] bool beginUiFrame();
     void render(float time, const RenderSettings& settings);
+    [[nodiscard]] bool captureOutputPng(const std::filesystem::path& outputPath,
+                                        std::string& error);
     void requestResize() noexcept { resizeRequested_ = true; }
     [[nodiscard]] const RendererStats& stats() const noexcept { return stats_; }
     [[nodiscard]] const PortalGrPrecomputedTable& portalGrTable() const noexcept {
@@ -76,8 +80,22 @@ private:
         std::uint32_t cameraMode{};
         float surfaceHeading{};
         float surfaceLookPitch{};
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        std::array<float, 4> systemStar{};
+        std::array<float, 4> systemStarColor{};
+        std::array<float, 4> systemAmbient{};
+        std::array<std::uint32_t, 4> systemControl{};
+        std::array<float, 4> systemPlanetRadii0{};
+        std::array<float, 4> systemPlanetRadii1{};
+        std::array<std::uint32_t, 4> systemPlanetSeeds0{};
+        std::array<std::uint32_t, 4> systemPlanetSeeds1{};
+#endif
     };
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    static_assert(sizeof(FrameConstants) == 256);
+#else
     static_assert(sizeof(FrameConstants) == 128);
+#endif
 
     struct alignas(16) PageRequestFeedbackHeader {
         std::uint32_t requestCount{};
@@ -170,6 +188,7 @@ private:
     [[nodiscard]] std::uint32_t findMemoryType(std::uint32_t typeBits, VkMemoryPropertyFlags flags) const;
 
     SDL_Window* window_{};
+    bool headlessCapture_{};
     bool validationEnabled_{};
     bool resizeRequested_{};
     bool imguiContextCreated_{};
@@ -227,6 +246,16 @@ private:
     VkDeviceMemory geodesicFarFieldMemory_{};
     VkBuffer geodesicMacroHierarchyBuffer_{};
     VkDeviceMemory geodesicMacroHierarchyMemory_{};
+    VkBuffer eightPlanetHierarchyBuffer_{};
+    VkDeviceMemory eightPlanetHierarchyMemory_{};
+    VkBuffer eightPlanetAuthorityBuffer_{};
+    VkDeviceMemory eightPlanetAuthorityMemory_{};
+    void* eightPlanetAuthorityMapped_{};
+    system_lab::SharedLodHierarchy eightPlanetHierarchy_{};
+    std::vector<std::uint32_t> eightPlanetHierarchyWords_;
+    std::vector<std::uint32_t> eightPlanetAuthorityWords_;
+    std::array<std::uint32_t, system_lab::kPlanetCount>
+        eightPlanetAuthoritySeeds_{};
     VkBuffer artifactDiagnosticBuffer_{};
     VkDeviceMemory artifactDiagnosticMemory_{};
     void* artifactDiagnosticMapped_{};

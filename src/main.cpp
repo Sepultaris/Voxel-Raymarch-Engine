@@ -3,11 +3,20 @@
 
 #include <SDL.h>
 
+#include <cmath>
 #include <exception>
+#include <filesystem>
 #include <iostream>
+#include <optional>
+#include <string>
 #include <string_view>
 
 int main(int argumentCount, char** arguments) {
+    bool headlessRequested = false;
+    for (int index = 1; index < argumentCount; ++index) {
+        headlessRequested = headlessRequested ||
+            std::string_view(arguments[index]) == "--headless-capture";
+    }
     try {
         const auto hasArgument = [&](std::string_view expected) {
             for (int index = 1; index < argumentCount; ++index) {
@@ -17,6 +26,106 @@ int main(int argumentCount, char** arguments) {
             }
             return false;
         };
+        const auto argumentValue = [&](std::string_view option)
+            -> std::optional<std::string_view> {
+            for (int index = 1; index + 1 < argumentCount; ++index) {
+                if (std::string_view(arguments[index]) == option) {
+                    return std::string_view(arguments[index + 1]);
+                }
+            }
+            return std::nullopt;
+        };
+        const auto captureOutput = argumentValue("--headless-capture");
+        if (headlessRequested && !captureOutput.has_value()) {
+            std::cerr << "--headless-capture requires an output .png path.\n";
+            return 2;
+        }
+        std::uint32_t captureFrames = 8U;
+        if (const auto value = argumentValue("--capture-frames")) {
+            try {
+                const unsigned long parsed = std::stoul(std::string(*value));
+                if (parsed == 0UL || parsed > 600UL) {
+                    throw std::out_of_range("capture frame count");
+                }
+                captureFrames = static_cast<std::uint32_t>(parsed);
+            } catch (...) {
+                std::cerr << "--capture-frames must be in [1, 600].\n";
+                return 2;
+            }
+        }
+#if VOXEL_GLOBAL_METRIC_LAB
+        std::uint32_t capturePreset = 0U;
+        if (const auto value = argumentValue("--capture-preset")) {
+            if (*value == "balanced") {
+                capturePreset = 0U;
+            } else if (*value == "no-handle") {
+                capturePreset = 1U;
+            } else if (*value == "rejected-broad") {
+                capturePreset = 2U;
+            } else if (*value == "rejected-hard-aperture") {
+                capturePreset = 3U;
+            } else {
+                std::cerr << "Unknown --capture-preset. Use balanced, no-handle, "
+                             "rejected-broad, or rejected-hard-aperture.\n";
+                return 2;
+            }
+        }
+        std::optional<float> captureTailScale;
+        if (const auto value = argumentValue("--capture-tail-scale")) {
+            try {
+                const float parsed = std::stof(std::string(*value));
+                if (!(parsed > 0.0F) || !std::isfinite(parsed)) {
+                    throw std::out_of_range("capture tail scale");
+                }
+                captureTailScale = parsed;
+            } catch (...) {
+                std::cerr << "--capture-tail-scale must be a positive finite value.\n";
+                return 2;
+            }
+        }
+        std::uint32_t captureCamera = 0U;
+        if (const auto value = argumentValue("--capture-camera")) {
+            if (*value == "reset") captureCamera = 0U;
+            else if (*value == "close-a") captureCamera = 1U;
+            else if (*value == "close-b") captureCamera = 2U;
+            else if (*value == "oblique-a") captureCamera = 3U;
+            else {
+                std::cerr << "Unknown --capture-camera. Use reset, close-a, "
+                             "close-b, or oblique-a.\n";
+                return 2;
+            }
+        }
+        std::optional<std::uint32_t> captureDebug;
+        if (const auto value = argumentValue("--capture-debug")) {
+            if (*value == "normal") captureDebug = 0U;
+            else if (*value == "bending") captureDebug = 6U;
+            else if (*value == "aa-samples") captureDebug = 7U;
+            else if (*value == "jacobian") captureDebug = 8U;
+            else {
+                std::cerr << "Unknown --capture-debug. Use normal, bending, "
+                             "aa-samples, or jacobian.\n";
+                return 2;
+            }
+        }
+#endif
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        std::uint32_t systemCapturePreset = 0U;
+        if (const auto value = argumentValue("--system-capture")) {
+            if (*value == "overview") systemCapturePreset = 0U;
+            else if (*value == "near") systemCapturePreset = 1U;
+            else if (*value == "mixed-lod") systemCapturePreset = 2U;
+            else if (*value == "traversal-8-1") systemCapturePreset = 3U;
+            else if (*value == "cycle-audit") systemCapturePreset = 4U;
+            else if (*value == "edit-persistence") systemCapturePreset = 5U;
+            else if (*value == "differential") systemCapturePreset = 6U;
+            else {
+                std::cerr << "Unknown --system-capture. Use overview, near, "
+                             "mixed-lod, traversal-8-1, cycle-audit, "
+                             "edit-persistence, or differential.\n";
+                return 2;
+            }
+        }
+#endif
 #if VOXEL_SCALE_LAB
         const std::string_view command = argumentCount > 1
             ? std::string_view(arguments[1]) : std::string_view{};
@@ -137,8 +246,7 @@ int main(int argumentCount, char** arguments) {
                                         std::string_view(arguments[1]) == "--artifact-regression";
         const bool rayStatusCapture = argumentCount > 1 &&
                                       std::string_view(arguments[1]) == "--ray-status-capture";
-        const bool rayStatusInteractive = argumentCount > 1 &&
-                                          std::string_view(arguments[1]) == "--ray-status";
+        const bool rayStatusInteractive = hasArgument("--ray-status");
         const bool rayFailureOverlay = argumentCount > 1 &&
                                        std::string_view(arguments[1]) == "--ray-failure-overlay";
         const bool rayFailureBenchmark = argumentCount > 1 &&
@@ -146,8 +254,8 @@ int main(int argumentCount, char** arguments) {
         const bool rayFailureSurfaceBenchmark = argumentCount > 1 &&
             std::string_view(arguments[1]) == "--ray-failure-surface-benchmark";
 #if VOXEL_INTRINSIC_PORTAL_LAB
-        const bool intrinsicTraversal = argumentCount > 1 &&
-            std::string_view(arguments[1]) == "--intrinsic-traversal-regression";
+        const bool intrinsicTraversal =
+            hasArgument("--intrinsic-traversal-regression");
 #else
         constexpr bool intrinsicTraversal = false;
 #endif
@@ -168,13 +276,32 @@ int main(int argumentCount, char** arguments) {
             return 2;
         }
 #endif
-        voxel::Application application(hasArgument("--force-regenerate-topology"));
+        voxel::Application application(
+            hasArgument("--force-regenerate-topology"), headlessRequested);
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        application.setEightPlanetCapturePreset(systemCapturePreset);
+#endif
         if (hasArgument("--no-micro-sdf")) {
             application.setTerrainMicroSdfEnabled(false);
         }
 #if VOXEL_GLOBAL_METRIC_LAB
+        if (headlessRequested) {
+            application.setGlobalLensCapturePreset(capturePreset);
+            if (captureTailScale.has_value()) {
+                application.setGlobalCaptureTailScale(*captureTailScale);
+            }
+            application.setGlobalCaptureCameraPreset(captureCamera);
+            // no-handle is itself the reference visualization; a generic
+            // --capture-debug normal must not silently turn the handle back on.
+            if (captureDebug.has_value() && capturePreset != 1U) {
+                application.setGlobalCaptureDebugMode(*captureDebug);
+            }
+        }
         if (hasArgument("--no-global-spatial-aa")) {
             application.setGlobalSpatialAaEnabled(false);
+        }
+        if (hasArgument("--global-no-handle-reference")) {
+            application.setGlobalNoHandleReference(true);
         }
 #endif
 #if VOXEL_INTRINSIC_PORTAL_LAB
@@ -207,7 +334,8 @@ int main(int argumentCount, char** arguments) {
                                           fractalSdfSurface;
         const bool artifactRun = artifactRegression || adaptiveSdfArtifact ||
                                  fractalSdfArtifact;
-        return application.run(smokeTest ? 3U
+        const int runResult = application.run(headlessRequested ? captureFrames
+                                         : smokeTest ? 3U
                                          : benchmark || bvhBenchmark || wideBenchmark ||
                                                    ddaBenchmark || rotationBenchmark ||
                                                    surfaceBenchmark || rayFailureBenchmark ||
@@ -215,7 +343,7 @@ int main(int argumentCount, char** arguments) {
                                                    scaleLabRotation || scaleLabSurface ||
                                                    adaptiveSdfBoundedRun ||
                                                    fractalSdfBoundedRun ? 120U
-                                         : intrinsicTraversal ? 80U
+                                         : intrinsicTraversal ? 160U
                                          : globalVisualRegression ||
                                                    globalVisualRegressionNoMedia ? 180U
                                          : artifactRun ? 720U
@@ -246,6 +374,23 @@ int main(int argumentCount, char** arguments) {
                                    scaleLabSurface || adaptiveSdfSurface ||
                                    fractalSdfSurface,
                                artifactRun || rayStatusCapture || scaleLabArtifact);
+        if (runResult != 0 || !headlessRequested) {
+            return runResult;
+        }
+        if (!application.headlessWindowStayedHidden()) {
+            std::cerr << "Headless capture aborted: SDL window became visible.\n";
+            return 16;
+        }
+        std::string captureError;
+        const std::filesystem::path outputPath{
+            std::string(*captureOutput)};
+        std::cout << "Headless capture: reading deterministic GPU frame...\n";
+        if (!application.captureFrame(outputPath, captureError)) {
+            std::cerr << "Headless capture failed: " << captureError << '\n';
+            return 17;
+        }
+        std::cout << "Headless capture complete: " << outputPath.string() << '\n';
+        return 0;
     } catch (const std::exception& error) {
         std::cerr << "Fatal error: " << error.what() << '\n';
 #if VOXEL_FRACTAL_VOXEL_SDF_LAB
@@ -261,6 +406,7 @@ int main(int argumentCount, char** arguments) {
             "TRUE FRACTAL PLANET SDF Lab - Startup Error",
             error.what(), nullptr);
 #elif VOXEL_PORTAL_LAB
+        if (!headlessRequested) {
         SDL_ShowSimpleMessageBox(
             SDL_MESSAGEBOX_ERROR,
 #if VOXEL_GLOBAL_METRIC_LAB
@@ -271,6 +417,7 @@ int main(int argumentCount, char** arguments) {
             "SPHERICAL WORMHOLE PORTAL Lab - Startup Error",
 #endif
             error.what(), nullptr);
+        }
 #endif
         return 1;
     }

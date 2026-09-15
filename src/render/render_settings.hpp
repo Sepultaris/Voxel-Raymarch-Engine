@@ -6,6 +6,7 @@
 #include "render/portal_lab.hpp"
 #include "render/space_environment.hpp"
 #include "render/volumetric_clouds.hpp"
+#include "render/eight_planet_system.hpp"
 
 #include <algorithm>
 #include <array>
@@ -76,6 +77,7 @@ struct RenderSettings {
     SpaceEnvironmentSettings spaceEnvironment{};
     PortalLabSettings portal{};
     IntrinsicEllisSettings intrinsicEllis{};
+    system_lab::Settings eightPlanetSystem{};
     bool terrainMicroSdfEnabled{true};
     float terrainMicroSdfStrength{0.075F};
     bool terrainMicroSdfDebug{};
@@ -283,6 +285,23 @@ struct RendererStats {
     std::uint64_t differentialHitMismatches{};
     std::uint64_t differentialDistanceMismatches{};
     std::uint32_t differentialMaximumDistanceUlps{};
+    std::uint64_t systemImmutableTopologyBytes{};
+    std::uint64_t systemSharedHierarchyBytes{};
+    std::uint64_t systemAuthorityBytes{};
+    std::uint64_t systemGeneratedPageEvaluations{};
+    std::uint64_t systemStalePageRejects{};
+    std::uint64_t systemConservativeBoundaryRefinements{};
+    std::uint64_t systemCoarseHits{};
+    std::uint64_t systemExactHits{};
+    std::uint64_t systemEditHits{};
+    std::uint64_t systemNonfiniteOutputs{};
+    std::uint64_t systemCracksOrClosedShellMisses{};
+    std::uint64_t systemDifferentialSamples{};
+    std::uint64_t systemDifferentialHitMismatches{};
+    std::uint64_t systemDifferentialDepthMismatches{};
+    std::uint64_t systemDifferentialMaterialMismatches{};
+    std::uint64_t systemAdaptiveBudgetFallbacks{};
+    std::uint64_t systemReferenceBudgetFallbacks{};
     double startupSeconds{};
     std::uint64_t cpuPeakBytes{};
     bool topologyCacheHit{};

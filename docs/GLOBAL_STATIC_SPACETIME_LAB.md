@@ -1,260 +1,334 @@
 # Global static spacetime lab
 
-## Accepted interactive path: native Ellis atlas
+## Default model: same-exterior smooth handle atlas
 
-The previous shared-exterior experiment was visually rejected. Despite its
-smooth conformal metric, it still applied topology through an explicit
-Euclidean mouth sphere. Rays tangent to that sphere selected a different
-content path, producing the huge perfectly circular star/planet boundary in
-the user capture. That contour was **not** the Ellis `b=a` critical curve.
+The isolated global lab models one exterior voxel world with two localized
+mouth charts joined by one continuous handle. Its window and in-app banner say
+`SAME-EXTERIOR SMOOTH HANDLE ATLAS`. The native two-ended Ellis universe is
+retained only behind the clearly labelled comparison checkbox.
 
-The interactive lab now uses the native signed-proper-depth Ellis atlas
-everywhere:
+This is a static ultrastatic spacetime,
 
-`ds^2 = dl^2 + (l^2 + a^2) dOmega^2`.
+`ds^2 = -dt^2 + g_ij dx^i dx^j`,
 
-The camera and each primary ray remain `(l,n,tangent)` states. They pass through
-the regular throat at `l=0` without a Euclidean aperture event, `lastMouth`
-visibility owner, or whole-scene A/B swap. Curvature decays continuously toward
-both asymptotically flat ends. The same path feeds terrain, media, and the
-direction-native star environment.
+with an engineered, non-vacuum/exotic-matter spatial handle. It is not an
+evolving Einstein-equation solver or a vacuum GR solution. An exact Ellis
+handle supplies the throat; jet-matched smooth monotone curvature tails
+attach it to the shared exterior.
 
-This is an exact static Ellis spatial metric, not an evolving Einstein solver.
-The old engineered shared-exterior sphere-remap implementation remains only as
-a historical automated differential and is explicitly labelled rejected in
-the UI. It is not selectable as the normal interactive renderer.
+The atlas has a shared exterior chart and one intrinsic handle chart. Mouth A
+and Mouth B overlap the handle's positive and negative collar ends. The mouth
+spheres are coordinate overlap surfaces only: they do not choose scene color,
+terminate a ray, own a visibility family, or act as opaque geometry.
 
-## Camera, ray, and topology state
+## Metric and overlap construction
 
-The two UI endpoints are now the `+l` and `-l` asymptotic content attachments
-of one Ellis throat. They are not two localized spherical apertures visible in
-one Euclidean room. `Home` starts on the positive end and `End` on the negative
-end. Movement is proper distance per second in the local orthonormal tetrad;
-the camera frame and velocity are parallel transported by the same integrator
-used to define ray transport.
+The exterior optical metric is conformally Euclidean. Both mouth contributions
+use a direction-independent radial profile and a C2 partition of unity. At
+either overlap the other mouth contribution vanishes with three derivatives.
+The complete intrinsic radial profile is exact Ellis. The exterior conformal
+field is constructed from the Ellis endpoint value, first derivative, and
+second derivative, then decays through a positive rational tail. Its
+fourth-order far term changes no boundary jet. It
+matches the pullback `R`, `R'`, and `R''` without squeezing a second lens into
+either end of the short handle.
 
-This distinction is necessary and candid: two localized mouths in a single
-otherwise-Euclidean exterior require a genuine smooth three-manifold handle
-atlas. The rejected cut-and-remap sphere did not provide one, and no amount of
-AA can make its binary aperture ownership C0. A future same-room two-mouth
-implementation must construct that topology directly rather than re-enable the
-legacy sphere.
+`HANDLE PROPER LENGTH` controls the actual intrinsic collar-to-collar metric
+distance, not a coordinate/display scale. The accepted `Very short` default is
+`2.00` throat diameters. With the default Planet-safe footprint, `a = 0.00875 R`,
+so the throat diameter is `0.0175 R` and the complete collar-to-collar path is
+`0.035 R`. The `0.32`-diameter option is retained and labelled
+`Ultra-short (surface-like)` because it makes almost every ray that enters the
+small coordinate mouth cross the waist, leaving almost no exterior-scattering
+annulus. `Reference` restores the historical approximately `5.78`-diameter
+path. A live change preserves normalized handle depth and rebuilds the same
+CPU/GPU radial-profile parameters.
 
-## Content ordering
+`LENS FOOTPRINT` changes physical scale rather than applying an image-space
+strength or influence mask. The presets are:
 
-Terrain, voxel materials, atmosphere, clouds, and stars remain content fields.
-The continuous Ellis path advances to a possible planet-content interval,
-where exact geodesic prism/event-DDA remains the terrain narrow phase. Empty
-conservative shells are workload hints only and never choose a path family.
+| Preset | Mouth radius | Ellis throat radius `a` | Exterior tail scale |
+| --- | ---: | ---: | ---: |
+| Planet-safe (default) | 0.025 | 0.00875 | 0.009 |
+| Compact | 0.12 | 0.042 | 0.020 |
+| Moderate | 0.18 | 0.063 | 0.025 |
+| Dramatic (former default) | 0.34 | 0.119 | 0.85 |
 
-Atmosphere/cloud radiance is composed in physical order on the source and
-destination content-bearing portions of the path. The inter-mouth throat is
-vacuum, so no medium is sampled across an imaginary Euclidean chord. Stars use
-the transported direction-native ray and one continuous footprint policy.
+The same dimensionless Ellis core, single waist, and handle-length ratio are
+retained. Planet-safe makes the physical throat and its smooth noncompact optical
+tail smaller relative to the radius-one planet. It does not terminate rays,
+mask pixels, or clamp mapped directions. The UI also reports the predicted
+critical angular diameter for both mouth centers from the live observer pose.
 
-## Isolation and controls
+The handle uses native `R(l)=sqrt(l^2+a^2)`, connection, camera transport, and
+local optical Jacobian over 100% of its proper length. This resolves the
+rejected “two wormholes in one hole” profile: expanding a `0.119` throat to the
+former `0.423` physical collar radius inside only `0.038` proper units per side
+requires an overshooting derivative and a second curvature pulse. The new
+construction maps the selected coordinate mouth through a conformal factor and
+exact Ellis jets, then distributes the scale match through the smooth exterior
+tail. There is one areal-radius minimum at `l=0`, with no collar-local
+optical waist or finite ray/content ownership surface.
 
-This remains an isolated lab target and does not change or promote f512:
+This produces a positive-definite spatial metric, inverse consistency, and a
+continuous connection across coordinate overlaps. It is a candid engineered
+handle, not the earlier cut-and-remap portal sphere. Curvature decays smoothly
+and is not compactly switched off at a finite influence radius.
 
+## Camera and rays
+
+The free-fly camera stores one manifold state: exterior position or intrinsic
+`(u,n)` handle position, a local orthonormal tetrad, proper velocity, affine
+distance, and chart ownership. Movement is proper distance per second. RK event
+splitting consumes the residual frame step at a crossing. The frame is parallel
+transported and corrected only for numerical drift; it is never rebuilt from a
+Euclidean world axis. Both mouth centers are traversable, including End-B
+orientation, with positive handedness and no teleport, cooldown, or crossfade.
+
+Two independent whole-view flip defects were corrected. The orthonormal-frame
+parallel-transport equation formerly applied radial basis expansion twice; it
+did not preserve frame norm and made the view forward diverge from an identical
+geodesic tangent. End B also reversed only the radial axis, giving its collar
+map determinant `-1`. The transport now uses the physical orthonormal warped-
+product connection, and B uses the antipodal sphere differential so radial and
+both angular axes form an orientation-preserving map. Numerical cleanup is a
+basis-free SO(3) projection against the transported frame, never a world-axis
+rebuild or a one-axis sign repair.
+
+Mouse yaw, pitch, and roll rotate that same authoritative tetrad in its local
+orthonormal frame in both charts. In the handle, yaw is about transported local
+up and pitch is about transported local right; the observer position is not
+changed. The exterior `forward/up` values are only mirrors while inside. This is
+important because rotating the mirror and then republishing the untouched
+handle tetrad made F7 mouse look appear disabled in the original atlas build.
+Movement and the same-frame GPU center ray now consume the rotated handle
+tetrad directly.
+
+Handle camera packets use a basis-free embedded tangent representation. The
+older packet stored `(radial,e1,e2)` components in a pole-safe angular basis
+whose least-aligned Cartesian reference axis changes on well-conditioned chart
+boundaries. Parallel transport remained continuous, but using those changing
+component triples directly as the GPU screen frame produced whole-view flips
+inside the handle. The screen camera is now a canonical local tetrad; each
+primary/AA ray is transformed by the embedded transported forward/up vectors
+before the temporary angular chart is used by the intrinsic solver. Angular
+basis ownership can therefore change without rotating the image.
+
+GPU primary rays and adaptive-AA subrays use the same exterior/handle state and
+half-open overlap ownership as the CPU body path. A chart transition remaps
+coordinates and tangent components only. It does not reset affine distance,
+ray cone, radiance, content, or ray family.
+
+The main shader formerly tested `camera.w > 0.5`, inherited from the original
+intrinsic lab where that lane was an enable bit. The same-exterior packet uses
+it for signed handle depth. Near and beyond the throat, that obsolete test
+skipped manifold tracing and launched DDA at the planet centre, causing
+full-screen closed-shell failures and visible planet interiors. The global path
+is now selected by the explicit atlas discriminator. The Vulkan crossing replay
+reports zero closed-shell and zero recoverable misses.
+
+## Content and participating media
+
+There is one exterior terrain, material, star, atmosphere, and cloud field. No
+`sign(u)` branch swaps duplicated universes. The source-side exact terrain
+segment is tested before a mouth event, the vacuum handle is traversed, and the
+destination-side exact query uses the transported exit state. Source and
+destination intervals coexist; recording one no longer suppresses the other.
+
+Atmosphere and clouds are integrated in physical order. An empty conservative
+planet/media shell is a broad-phase interval only and cannot select the
+renderer. Destination overlap also handles a mouth that emerges directly
+inside that query volume. Default mouth standoff is derived from the actual
+generated f512 terrain bound, so no exit is seeded inside opaque relief. Stars
+use the polar-safe direction-native environment and transported ray footprint.
+
+## Optical boundary and AA
+
+The old fixed-radius color boundary was a renderer policy defect. It is gone.
+A real handle still has a ray-family separatrix: small-impact rays traverse the
+handle while larger-impact rays remain in the exterior. A critical curve is
+accepted only where the geodesic Jacobian approaches zero or changes parity; it
+must not coincide with a content shell, solver class, or chart threshold.
+
+The one measure-zero critical geodesic has deterministic half-open ownership.
+CPU and GPU use the same representable-scale impact band,
+`max(2e-5 a, 16 epsilon_float R_entry)`; this replaces the former roughly
+two-pixel snap. It is not a screen-space tolerance. Finite rays immediately
+outside that band retain their own impact and are integrated normally. Mouth
+chart ownership is independently tested at exact tangency and at one through
+four float ULPs inward/outward.
+
+Normal rendering uses one sample per pixel. A deterministic rotated four-sample
+pattern is queued only for Jacobian distortion, parity, silhouette, or coverage
+transitions. Subrays retain independent exact terrain and ordered media results;
+linear-HDR radiance is coverage averaged before tone mapping. There is no
+stochastic jitter, temporal history, screen warp, or synthetic depth blend.
+
+## Controls
+
+Executable: `build-global-metric-lab/voxel_engine_global_metric_lab.exe`
+
+- `F7`: portal free-fly
+- mouse: look
+- `WASD`: local forward/strafe
+- `Space` / `Ctrl`: local vertical
+- `Q` / `E`: roll
+- `Shift`: sprint
+- `Home`: reset outside Mouth A
+- `End`: reset outside Mouth B
+
+The UI exposes same-exterior/native-reference selection; Planet-safe, Compact,
+Moderate, and Dramatic physical lens-footprint presets; the `Very short`,
+`Ultra-short (surface-like)`, and `Reference` handle-length presets plus a
+logarithmic custom slider; and the
+fixed `100% native Ellis / one waist` optical-profile status. Switching
+to native Ellis while inside the handle preserves signed
+proper depth, angular point, transported camera tetrad, and FOV, making the A/B
+comparison meaningful instead of resetting the viewpoint. Integration quality,
+End-B rotation, proper speed, exterior-tail scale, AA thresholds, chart/depth,
+handedness, and explicit path/Jacobian debug views remain available.
+
+## Hidden deterministic capture
+
+The global-lab executable can render a bounded Vulkan run into a PNG while the
+SDL window remains hidden. Automated validation must use this path; it must not
+show, raise, focus, or mouse-capture the window.
+
+```text
+voxel_engine_global_metric_lab.exe \
+  --headless-capture artifacts/short-handle-crossing/close-a.png \
+  --capture-frames 8 \
+  --capture-preset balanced \
+  --capture-camera close-a \
+  --capture-debug normal
 ```
-build-global-metric-lab/voxel_engine_global_metric_lab.exe
-```
 
-Controls are `F7`, mouse look, `WASD`, `Space/Ctrl`, `Q/E`, and `Shift`.
-`Home` resets on the `+l` end and `End` on the `-l` end. UI reports signed
-proper depth, frame determinant, exact metric status, cache status, and
-non-finite ray telemetry. The window and banner say `NATIVE ELLIS ATLAS` so a
-legacy shared-exterior build cannot be mistaken for the accepted experiment.
+`--capture-frames` accepts `1..600`. Capture presets are `balanced` (the
+accepted Planet-safe/2.00 configuration), `no-handle`, `rejected-broad`, and
+`rejected-hard-aperture`. Camera presets are `reset`, `close-a`, `close-b`, and
+`oblique-a`. Debug views are `normal`, `bending`, `aa-samples`, and `jacobian`.
+`--capture-tail-scale <positive-float>` overrides only the exterior-tail scale.
+`--global-no-handle-reference` is also available for an identical renderer pose
+without handle bending. Invalid options fail before the application is created;
+after rendering, capture aborts if SDL reports that the window ever became
+visible. The `no-handle` capture preset remains authoritative even if a generic
+`--capture-debug normal` is also supplied.
 
-## Research basis and scope
+## Validation
 
-The GPU geodesic architecture is informed by
-[GRay](https://arxiv.org/abs/1303.5057),
-[Odyssey](https://arxiv.org/abs/1601.02063), and the metric/derivative/
-Christoffel separation in the
-[spacetime-agnostic GR tracer](https://arxiv.org/abs/2510.15049). The analytic
-Ellis model remains the reference used to validate throat behavior.
+The CPU global-field gate covers positive metric/inverse consistency; exterior
+and handle `R/R'/R''` pullback agreement; overlap limits including ULP offsets;
+independent high-precision ODE comparison; Hamiltonian/null preservation; time
+reversal; finite critical integration; proper camera speed; transported frame
+handedness; centered/off-axis A-to-B and B-to-A body/ray equality; End-B
+rotations; poles; exact tangent ownership with one-through-four-ULP inward and
+outward perturbations; dense subframe crossing; and
+non-owning content-shell/star/AA invariants.
 
-This lab does not solve the Einstein field equations, evolve stress-energy,
-back-react terrain, or simulate gravitational radiation. F6 capsule collision
-and gravity are not yet global-manifold physics. The free-fly controller is the
-supported traversal path. Terrain bodies do not span the throat itself.
-Participating media are planet-attached content fields; within a content shell
-the adaptive path is handed to the exact local query as a bounded chord.
-Sampling arbitrary media density at every geodesic substep is a future
-extension.
+The controller gate also applies nonzero yaw/pitch/roll at positive handle
+depth, `u=0`, negative depth, both pole-like angular orientations, and both
+mouth directions. It requires zero-input frame preservation, local-forward
+movement after look, positive handedness through repeated look plus traversal,
+and an immediate match between the CPU tetrad and packed GPU center ray. A
+dedicated reference-axis sweep crosses the former least-aligned-axis boundary,
+proves that the legacy local packet jumps, and requires the embedded packet and
+off-axis reconstructed rays to remain continuous.
 
-## Regression gates
+The short-handle gate integrates the surface-like `0.32`, intermediate `0.75`,
+accepted `2.00`, and reference length presets, checks monotone
+proper-length parameters, exact native Ellis `R/R'/R''` across the complete
+handle, exactly one areal-radius minimum, monotonically decaying sectional
+curvature away from the waist, positive finite profiles, and both C2 exterior
+attachment jets, then stops immediately before and advances through the exact
+collar event to reject step tunneling. A focused mouth-disk differential also
+requires the accepted 2.00 path to restore a substantial source-side scattering
+annulus relative to the 0.32 surface-like comparison. Manual-style A-to-B and B-to-A
+crossings run at 20,
+60, and 240 Hz while yaw, pitch, and roll continue. They require one event,
+positive handedness, proper-speed motion, orientation-preserving A/B transition
+determinants, and same-frame CPU/GPU chart packets. A genuine narrow optical
+separatrix is accepted only as a localized ray/Jacobian family change; center
+and majority screen rays must remain continuous, so it cannot validate a
+whole-camera flip.
 
-`intrinsic_ellis_manifold_test` checks radial and off-axis C1 throat crossing,
-time reversal, parallel transport, positive handedness, proper speed, pole-safe
-angular transport, and the independent signed-end exit oracle. The global
-field test additionally verifies that the interactive GPU packet contains the
-native signed-l state and cannot silently fall back to a mouth-owner pose. The
-rejected shared-exterior path retains historical differential coverage, but is
-not the interactive acceptance model.
+The lens-footprint gate sweeps both mouths at three observer distances with a
+41 by 23 ray bundle and a radius-one planet placed behind/beside the mouths. It
+records the screen fraction with more than five degrees of mapped-direction
+deviation, the throat-crossing/critical fraction, the analytic critical-cone
+area, and the fraction of direct primary-planet rays replaced by a crossing
+secondary image. Compact and Dramatic use the same exact solver and differ only
+in physical scale and smooth-tail parameters.
 
-The native Vulkan traversal performs both throat directions in one continuous
-camera run. It requires finite paths, front-facing terrain coverage, ordered
-media, no interior-hit fallback, and no frame with lost terrain or required
-media coverage. Legacy media-on/off replays remain useful for ensuring earlier
-terrain ordering fixes do not regress, but they do not establish native-atlas
-continuity. Existing f512 gates remain a separate isolation check.
+The Vulkan replay crosses both chart ends with media and AA. It requires finite
+paths, zero affine exhaustion, zero owner mismatch, and zero closed-shell or
+recoverable misses. Separate media-on/off sweeps exercise both mouths,
+foreground and destination terrain, atmosphere, clouds, stars, and planet-near
+views.
 
-### Camera crossing continuity
+The current accepted checkpoint capture is
+`artifacts/short-handle-crossing/headless-close-length200-mouth025-tail009.png`.
+It uses the 2.00-diameter handle, `0.025 R` mouth, `0.00875 R` Ellis throat, and
+`0.009 R` tail. The completed hidden capture set is:
 
-The user capture disproved the prior owner-persistence patch. That patch made a
-discrete remap less unstable but retained the wrong primitive: a ray either hit
-the Euclidean mouth sphere and entered Ellis transport or did not. The finite
-sphere was therefore a binary radiance-family edge, and the camera still
-changed exterior embeddings at a discrete crossing.
+- `headless-close-a-length200-mouth025-tail009.png`
+- `headless-close-b-length200-mouth025-tail009.png`
+- `headless-oblique-a-length200-mouth025-tail009.png`
+- `headless-close-a-no-handle.png`
+- `headless-close-a-rejected-broad.png`
 
-The accepted path removes that state. The GPU packet carries signed `l`, the
-angular unit vector, and the local orthonormal forward/up tetrad. `l=0` is an
-ordinary integration point of the Ellis metric; there is no endpoint center,
-mouth owner, event radius, or one-frame CPU/GPU chart handoff to pack. The
-deterministic Vulkan replay crosses `+l -> -l`, reverses, and crosses
-`-l -> +l`. Both measured throat events have zero adjacent-frame forward-angle
-jump, zero unresolved ray, zero affine-budget exhaustion, and zero closed-shell
-or recoverable miss. The broader flight still shows legitimate continuous
-parallel transport in strong curvature and is reported separately from the
-crossing event.
+The no-handle/corrected close-A pair uses an identical camera pose. The oblique
+preset offsets the observer tangentially and looks toward the planet; it is not
+the former centered camera with only a larger standoff. Still inspection shows
+the planet retained in all accepted poses and confines the black critical bands
+and repeated planet image to the localized lens structure. Whether those bands
+read correctly during motion remains a manual acceptance question.
+Automated tests and a still capture do not establish user motion acceptance;
+the lab remains isolated until the user evaluates an interactive crossing and
+its genuine critical curves.
 
-Visual evidence is stored in
-`artifacts/global-crossing-discontinuity/native-ellis-crossing.mp4` and its
-contact sheet. The old giant fixed-radius circle is absent. Strong stretching
-and repeated star images can remain near the genuine Ellis separatrix; those
-features follow impact parameter/Jacobian, not a fixed Euclidean sphere.
+## Performance and limitations
 
-The newer bidirectional contact sheet makes the remaining circle explicit. At
-the replay start `l=0.355965`, `a=0.34`, so the analytic critical cone is
-`alpha=asin(a/sqrt(l^2+a^2))=0.776949 rad` (44.52 degrees). Independent ODE
-samples on its two sides give `b/a=0.995721` (crossing) and `1.00428`
-(scattering). The circle therefore is the exact Ellis `b=a` separatrix, not the
-removed mouth sphere. Because the two asymptotic content attachments currently
-carry visibly different radiance, that physical ray-family boundary remains a
-large contrast edge. Four-sample coverage stabilizes its finite pixel edge but
-cannot make the two boundary conditions C0 without an unphysical radiance
-blend. This visual model is consequently **not user-accepted** yet. Removing
-the contour requires a product/model choice: a materially smaller physical
-throat, matching continuous content boundary conditions on both ends, or the
-more substantial genuine same-exterior handle atlas described above.
+The objective footprint and planet-subject sweeps now validate the Planet-safe
+configuration against the former Dramatic field and the rejected broad-tail
+configuration. Exact measurements are recorded by each focused run rather than
+copied from the obsolete 0.32/Compact checkpoint.
 
-The direction-native star environment is evaluated from the final selected
-content-query origin and direction, including a mapped/lensed exit. Planet
-horizon exclusion uses the closest point on the **forward ray half** only. If
-the closest approach lies behind that origin, visibility is exactly one; this
-prevents the former antipodal duplicate planet mask while retaining the normal
-forward silhouette guard. Paired CPU toward/away checks span observer distance
-and rotated mapped exits, while the media-on/off GPU replays exercise both
-mouths and camera approach without changing the background ownership rule.
+Performance acceptance is likewise based on the current command output. The
+GPU gates report frame time, AA coverage/subray counts, ray ownership and affine
+exhaustion, closed-shell/recoverable misses, and media coverage. Passing those
+automated gates does not promote this isolated lab to f512; the current
+Planet-safe/2.00 configuration still requires explicit manual-motion acceptance.
 
-### Geodesic-Jacobian spatial AA
+The 2026-08-22 hidden Vulkan gates on the development RTX 5070 measured:
 
-The lab now keeps the normal renderer at exactly one sample per pixel and
-appends only conservative high-curvature, mouth-critical, terrain-silhouette,
-or disocclusion candidates to a compact GPU queue. A separate coherent pass
-traces the deterministic rotated four-sample pattern
-`(-.375,-.125), (.125,-.375), (.375,.125), (-.125,.375)`. Four subrays run as
-independent invocations, then a small resolve pass reconstructs the local
-finite-difference geodesic Jacobian. It records determinant sign/parity,
-magnification, anisotropic distortion, exit/hit family, and depth coverage.
+| Gate | Frames | FPS | Planet compute | Total compute | Result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| ordinary benchmark | 120 | 113.99 | 8.23798 ms | 8.25283 ms | pass |
+| crossing traversal | 160 | 38.8738 | 24.3035 ms | 24.3158 ms | pass |
+| media-on sweep | 180 | 16.6494 | 34.0930 ms | 34.1091 ms | pass |
+| no-media sweep | 180 | 16.6641 | 33.3034 ms | 33.3179 ms | pass |
 
-The four samples retain independent exact DDA hits and ordered source/dest
-atmosphere/cloud integration. Their linear-HDR radiance is averaged as pixel
-coverage and tone mapped once. Depths and chart states are never averaged into
-a synthetic ray. A parity, exit family, hit/miss, silhouette, or material-depth
-transition therefore receives deterministic coverage sampling instead of a
-cross-family blur. Smooth candidates rejected by the Jacobian leave the
-original 1x pixel untouched. There is no frame hash, time jitter, temporal
-history, or screen-space crossfade.
+The ordinary benchmark selected `0.0322222%` of pixels for adaptive AA
+(`13,804` subrays). Traversal reported maximum adjacent-frame turning of
+`0.336194 rad`, zero unresolved rays, affine exhaustions, owner mismatches,
+closed-shell misses, and recoverable misses. Each media sweep mapped all
+`16,110,000` classified rays finitely; the media-on run recorded
+`7,161,205` atmosphere and `6,064,541` cloud intervals, while the no-media run
+recorded zero of both as required. These measurements still miss the 18 ms
+near-mouth target, so performance is not accepted.
 
-UI controls expose enable, distortion threshold, and magnification threshold.
-The output selector adds sample-count, signed determinant/parity,
-magnification, and family-rejection/coverage views. The queue and resolve use
-the existing lab diagnostic allocation and indirect dispatch, so an empty AA
-queue launches zero subray workgroups. `--no-global-spatial-aa` provides the
-1x differential/performance reference; it does not select another geometry or
-solver.
+At extreme close range, or when the observer deliberately aligns the planet
+with the true Ellis critical cone, physical secondary images can still occupy a
+large part of the view. Planet-safe makes that configuration much less common; it
+does not suppress the genuine caustic with a nonphysical screen mask.
 
-The former Euler/midpoint critical solver is replaced by an embedded
-midpoint/RK4 error-controlled step with exact fractional throat/content events.
-The small-step high-precision RK integrator remains an independent CPU oracle.
-Both-mouth sweeps compare owner, exit origin, and direction; the certified
-separatrix neighborhood is coverage sampled because its two ray families are
-physically discontinuous. An unfinished affine path is still a hard failure,
-never valid sky.
+The next optimization target is coherent reuse of observer invariants and
+fewer repeated exterior/handle solves without restoring hard endpoints or
+approximation surfaces. Global F6 capsule collision and dynamic spacetime
+evolution remain out of scope.
 
-The throat separatrix remains a real critical curve: crossing rays see the
-linked end while non-crossing rays stay on the observer end. Repeated images
-and sharp magnification near that curve are physical behavior of the selected
-topology, not the removed outer solver/standoff circle. Spatial AA stabilizes
-that thin transition; it does not erase or blur the topology. Temporal
-accumulation remains explicitly deferred.
-
-### Spatial-AA validation and measured cost
-
-The acceptance replay uses both mouths, media enabled and disabled, the
-recorded high-magnification crossing, and subpixel camera offsets. The CPU
-differential covers 257 optimized-versus-high-precision rays per mouth plus a
-1025-ray near-critical sweep. Outside the explicitly certified separatrix
-neighborhood, exit-origin and exit-direction error remain below `0.012` and
-ray-family ownership agrees. The GPU replay reports zero unresolved affine
-paths, zero whole-mouth coverage loss, and zero streaming overflow/stale
-requests. The f512 production isolation suite remains 25/25.
-
-Representative 1600x900 measurements on the development GPU are:
-
-| Replay | Spatial AA | Planet compute | Selected pixels | Result |
-| --- | ---: | ---: | ---: | --- |
-| Native Ellis ordinary | off | 12.28 ms | 0% | correctness reference |
-| Native Ellis ordinary | on | 32.69 ms | 1.001% | performance-unaccepted |
-| Native Ellis bidirectional crossing | on | 48.32 ms | 0.411% | continuity accepted, performance-unaccepted |
-
-The native exact path averages about 24.3 central steps in the ordinary run.
-Although AA selects only about one percent of pixels, its current append/
-subray/resolve implementation raises ordinary cost substantially. The requested
-`12 ms` ordinary and `18 ms` near-throat targets are therefore **not accepted**
-with AA enabled. Correctness was deliberately not traded back for the old
-sphere policy. The standalone lab remains experimental and is not promoted to
-f512.
-
-The inspected before/after evidence is stored under
-`artifacts/global-spatial-aa/`: the original stepped-banding screenshot, a
-crossing recording, and a 4x4 contact sheet from the corrected renderer.
-
-### Content-query shell is not a path endpoint
-
-The planet-content outer radius (`planetOuterScale + 0.30`, approximately
-`1.30R`) is now only a conservative broad-phase/query interval. It does not
-terminate a geodesic, select a ray family, restart media, or replace the final
-star direction. On crossing that shell the shader records a bounded local
-terrain/media candidate interval and continues the same error-controlled
-geodesic to its full affine endpoint. Exact event-DDA can select a foreground
-hit inside the recorded interval; otherwise the fully transported endpoint,
-direction, parity, Jacobian, and angular footprint remain authoritative.
-
-This removes the planet-centered circular contour previously produced when
-the first `1.30R` entry was incorrectly returned as the final mapped ray.
-Debug output `Content query shell (cyan = crossed; never owns path)` shows the
-broad-phase event explicitly without changing normal output. The corresponding
-counter is also reported by the bounded GPU replays.
-
-The CPU regression recreates the reported camera geometry and sweeps the
-shell tangent at `+-ULP` and subpixel offsets for both mouths. It compares the
-optimized full-affine result against an independent 8192-step integrator and
-requires practical C1 endpoint/frame continuity. Media-on and media-off GPU
-replays each traced 16,110,000 samples with 4,086,173 shell crossings, zero
-affine-budget exhaustion, zero recovered/missed terrain hits, and continuous
-coverage. Sparse Jacobian AA was then rerun on the corrected path.
-
-The earlier `9.21/10.66 ms` measurements below this historical shell milestone
-used the now-rejected shared-exterior policy and are not representative of the
-native Ellis interactive path. Current native measurements are recorded in the
-table above; the lab remains performance-unaccepted and isolated from f512.
-
-The inspected corrected sweep and contact sheet are under
-`artifacts/global-content-shell/`. A thin inner Einstein/terrain-limb ring can
-still occur where physical ray families or an actual foreground silhouette
-meet. Unlike the removed contour, it is not fixed to `1.30R`, does not select
-a query policy, and moves according to the transported geodesic/Jacobian.
+The architecture follows GPU geodesic practices from
+[GRay](https://arxiv.org/abs/1303.5057) and
+[Odyssey](https://arxiv.org/abs/1601.02063), with analytic Ellis geometry as
+the independent throat reference. The same-exterior topology and exterior attachment are
+engineered for this lab and documented as such.

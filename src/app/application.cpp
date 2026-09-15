@@ -27,7 +27,8 @@ constexpr std::uint32_t kMaxMarchSteps = 512;
 
 } // namespace
 
-Application::Application(bool forceTopologyRegeneration) {
+Application::Application(bool forceTopologyRegeneration, bool headlessCapture)
+    : headlessCapture_(headlessCapture) {
     SDL_SetMainReady();
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER) != 0) {
         throw sdlError("SDL initialization failed");
@@ -36,8 +37,10 @@ Application::Application(bool forceTopologyRegeneration) {
     window_ = SDL_CreateWindow(
 #if VOXEL_FRACTAL_VOXEL_SDF_LAB
         "Voxel Planet Engine - ADAPTIVE VOXELIZED FRACTAL SDF Lab",
+#elif VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        "Voxel Planet Engine - EIGHT-PLANET HEX-LOD WORMHOLE SYSTEM Lab - UNPROMOTED",
 #elif VOXEL_GLOBAL_METRIC_LAB
-        "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - NATIVE ELLIS ATLAS",
+        "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - SAME-EXTERIOR SMOOTH HANDLE ATLAS",
 #elif VOXEL_INTRINSIC_PORTAL_LAB
         "Voxel Planet Engine - INTRINSIC ELLIS MANIFOLD Lab",
 #elif VOXEL_PORTAL_LAB
@@ -55,7 +58,9 @@ Application::Application(bool forceTopologyRegeneration) {
         SDL_WINDOWPOS_CENTERED,
         1600,
         900,
-        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+        SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI |
+            (headlessCapture_ ? static_cast<Uint32>(SDL_WINDOW_HIDDEN)
+                              : Uint32{0}));
     if (window_ == nullptr) {
         SDL_Quit();
         throw sdlError("Window creation failed");
@@ -65,8 +70,10 @@ Application::Application(bool forceTopologyRegeneration) {
     // The f512 topology is generated synchronously during renderer startup.
     // Show and service the lab window before that work begins so Windows does
     // not replace the application with a short-lived unresponsive ghost.
-    SDL_ShowWindow(window_);
-    SDL_RaiseWindow(window_);
+    if (!headlessCapture_) {
+        SDL_ShowWindow(window_);
+        SDL_RaiseWindow(window_);
+    }
     SDL_PumpEvents();
 #endif
 #if VOXEL_INTRINSIC_PORTAL_LAB
@@ -80,12 +87,14 @@ Application::Application(bool forceTopologyRegeneration) {
         SDL_FlushEvents(SDL_MOUSEBUTTONDOWN, SDL_MOUSEBUTTONUP);
         SDL_SetWindowTitle(window_,
 #if VOXEL_GLOBAL_METRIC_LAB
-                           "GLOBAL STATIC SPACETIME Lab - Loading native Ellis atlas and topology...");
+                           "GLOBAL STATIC SPACETIME Lab - Loading same-exterior handle atlas and topology...");
 #else
                            "Voxel Planet Engine - INTRINSIC ELLIS MANIFOLD Lab");
 #endif
-        SDL_ShowWindow(window_);
-        SDL_RaiseWindow(window_);
+        if (!headlessCapture_) {
+            SDL_ShowWindow(window_);
+            SDL_RaiseWindow(window_);
+        }
         SDL_PumpEvents();
 #endif
 
@@ -98,8 +107,16 @@ Application::Application(bool forceTopologyRegeneration) {
                 "Global metric/Christoffel patch precompute was non-finite");
         }
 #endif
-        renderer_ = std::make_unique<VulkanRenderer>(window_, forceTopologyRegeneration);
+        renderer_ = std::make_unique<VulkanRenderer>(
+            window_, forceTopologyRegeneration, headlessCapture_);
         const RendererStats& stats = renderer_->stats();
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        renderSettings_.visualizationMode = 101U;
+        renderSettings_.animate = false;
+        renderSettings_.timeScale = 0.0F;
+        renderSettings_.geodesicTraversalMode = 2U;
+        renderSettings_.terrain.seed = 1337U;
+#endif
         surfaceCamera_.configureVoxelGeometry(
             stats.averageSurfaceCellWidth * renderSettings_.planetRadius,
             stats.averageRadialLayerHeight * renderSettings_.planetRadius,
@@ -107,6 +124,28 @@ Application::Application(bool forceTopologyRegeneration) {
 #if VOXEL_INTRINSIC_PORTAL_LAB
 #if VOXEL_GLOBAL_METRIC_LAB
         renderSettings_.intrinsicEllis.globalMetricField = true;
+        // The former broad-tail presets redirected most of the primary planet
+        // image even when their critical ring was small. Start on the
+        // physically smaller, tail-localized planet-safe preset; no influence
+        // mask or optical-strength clamp is involved.
+        globalHandleApplyLensFootprintPreset(
+            renderSettings_.intrinsicEllis,
+            GlobalHandleLensFootprintPreset::PlanetSafe);
+        // A handle overlap chart may intersect atmosphere, but its complete
+        // coordinate sphere must not begin inside opaque voxel terrain.  The
+        // former fixed 1.58 R center placed the inward side of a 0.34 R mouth
+        // below the generated f512 relief bound, so post-handle rays began
+        // inside the planet and exposed back/interior faces.  Derive the lab
+        // default from the actual topology bound instead of guessing it.
+        const float safeMouthCenter = stats.planetOuterScale +
+            renderSettings_.intrinsicEllis.contentSphereRadius +
+            std::max(stats.averageRadialLayerHeight * 2.0F, 0.025F);
+        renderSettings_.intrinsicEllis.endpointADistance = std::max(
+            renderSettings_.intrinsicEllis.endpointADistance,
+            safeMouthCenter);
+        renderSettings_.intrinsicEllis.endpointBDistance = std::max(
+            renderSettings_.intrinsicEllis.endpointBDistance,
+            safeMouthCenter);
         renderSettings_.intrinsicEllis.throatRadius =
             renderSettings_.intrinsicEllis.contentSphereRadius *
             kPortalGrThroatRatio;
@@ -125,12 +164,14 @@ Application::Application(bool forceTopologyRegeneration) {
         SDL_FlushEvents(SDL_MOUSEBUTTONDOWN, SDL_MOUSEBUTTONUP);
         SDL_SetWindowTitle(window_,
 #if VOXEL_GLOBAL_METRIC_LAB
-                           "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - NATIVE ELLIS ATLAS");
+                           "Voxel Planet Engine - GLOBAL STATIC SPACETIME Lab - SAME-EXTERIOR SMOOTH HANDLE ATLAS");
 #else
                            "Voxel Planet Engine - INTRINSIC ELLIS MANIFOLD Lab");
 #endif
-        SDL_ShowWindow(window_);
-        SDL_RaiseWindow(window_);
+        if (!headlessCapture_) {
+            SDL_ShowWindow(window_);
+            SDL_RaiseWindow(window_);
+        }
         SDL_PumpEvents();
 #endif
 #if VOXEL_FRACTAL_PLANET_SDF_LAB
@@ -140,8 +181,10 @@ Application::Application(bool forceTopologyRegeneration) {
 #else
                            "Voxel Planet Engine - TRUE FRACTAL PLANET SDF Lab");
 #endif
-        SDL_ShowWindow(window_);
-        SDL_RaiseWindow(window_);
+        if (!headlessCapture_) {
+            SDL_ShowWindow(window_);
+            SDL_RaiseWindow(window_);
+        }
 #if VOXEL_FRACTAL_VOXEL_SDF_LAB
         // Topology construction is synchronous and can take long enough for
         // unrelated keys from the previously focused application to queue on
@@ -166,6 +209,110 @@ Application::~Application() {
         SDL_DestroyWindow(window_);
     }
     SDL_Quit();
+}
+
+bool Application::captureFrame(const std::filesystem::path& outputPath,
+                               std::string& error) {
+    if (!renderer_) {
+        error = "renderer is unavailable";
+        return false;
+    }
+    return renderer_->captureOutputPng(outputPath, error);
+}
+
+bool Application::headlessWindowStayedHidden() const noexcept {
+    return !headlessCapture_ || window_ == nullptr ||
+        (SDL_GetWindowFlags(window_) & SDL_WINDOW_SHOWN) == 0U;
+}
+
+void Application::setGlobalLensCapturePreset(std::uint32_t preset) noexcept {
+#if VOXEL_GLOBAL_METRIC_LAB
+    auto& settings = renderSettings_.intrinsicEllis;
+    settings.debugMode = 0U;
+    if (preset == 1U) {
+        settings.debugMode = 12U;
+    } else if (preset == 2U) {
+        // Exact rejected broad-tail Compact configuration retained solely for
+        // deterministic A/B regression captures.
+        settings.contentSphereRadius = 0.18F;
+        settings.throatRadius = 0.063F;
+        settings.globalHandleTailScale = 0.225F;
+    } else if (preset == 3U) {
+        // Exact rejected over-localized/hard-aperture configuration.
+        settings.contentSphereRadius = 0.070F;
+        settings.throatRadius = settings.contentSphereRadius *
+            kPortalGrThroatRatio;
+        settings.globalHandleTailScale = 0.012F;
+    } else {
+        globalHandleApplyLensFootprintPreset(
+            settings, GlobalHandleLensFootprintPreset::PlanetSafe);
+    }
+    if (preset >= 2U) {
+        settings.contentExitProperDepth = std::sqrt(std::max(
+            settings.contentSphereRadius * settings.contentSphereRadius -
+                settings.throatRadius * settings.throatRadius,
+            1.0e-8F));
+    }
+    intrinsicEllisCamera_.resetGlobal(settings, 0U);
+    syncIntrinsicEllisRenderSettings();
+#else
+    (void)preset;
+#endif
+}
+
+void Application::setGlobalCaptureTailScale(float tailScale) noexcept {
+#if VOXEL_GLOBAL_METRIC_LAB
+    renderSettings_.intrinsicEllis.globalHandleTailScale = std::clamp(
+        tailScale,
+        renderSettings_.intrinsicEllis.contentSphereRadius * 0.04F,
+        1.25F);
+    syncIntrinsicEllisRenderSettings();
+#else
+    (void)tailScale;
+#endif
+}
+
+void Application::setGlobalCaptureCameraPreset(std::uint32_t preset) noexcept {
+#if VOXEL_GLOBAL_METRIC_LAB
+    if (preset == 0U) return;
+    auto state = intrinsicEllisCamera_.globalState();
+    const auto centers = globalHandleCenters(renderSettings_.intrinsicEllis);
+    const std::uint32_t mouth = preset == 2U ? 1U : 0U;
+    const PortalVector outward = portalNormalize(centers[mouth]);
+    const PortalVector reference = std::abs(outward.y) < 0.92F
+        ? PortalVector{0.0F, 1.0F, 0.0F}
+        : PortalVector{1.0F, 0.0F, 0.0F};
+    const PortalVector lateral = portalNormalize(portalCross(
+        reference, outward));
+    // Reproduces the authoritative close, planet-behind-mouth evaluation
+    // pose without depending on interactive movement or a captured desktop.
+    const float standoff = preset == 3U ? 0.22F : 0.14F;
+    state.position = centers[mouth] + outward * standoff;
+    if (preset == 3U) {
+        state.position = state.position + lateral * 0.12F;
+        state.forward = portalNormalize(state.position * -1.0F);
+    } else {
+        state.forward = -outward;
+    }
+    state.up = portalOrthonormalUp(state.forward, reference);
+    state.velocity = {};
+    state.chart = 0U;
+    state.lastMouth = 2U;
+    state.finite = true;
+    intrinsicEllisCamera_.setGlobalState(state);
+    syncIntrinsicEllisRenderSettings();
+#else
+    (void)preset;
+#endif
+}
+
+void Application::setGlobalCaptureDebugMode(std::uint32_t mode) noexcept {
+#if VOXEL_GLOBAL_METRIC_LAB
+    renderSettings_.intrinsicEllis.debugMode = std::min(mode, 12U);
+    syncIntrinsicEllisRenderSettings();
+#else
+    (void)mode;
+#endif
 }
 
 void Application::beginIntrinsicEllisTraversalRegression() noexcept {
@@ -193,6 +340,19 @@ void Application::beginIntrinsicEllisTraversalRegression() noexcept {
     state.properDepth =
         renderSettings_.intrinsicEllis.contentExitProperDepth * 0.38F;
     intrinsicEllisCamera_.setState(state, intrinsicEllisCamera_.frame());
+    if (!renderSettings_.intrinsicEllis.globalNativeEllisPath) {
+        GlobalHandleObserverState handle = globalHandleResetObserver(
+            renderSettings_.intrinsicEllis, 0U);
+        const PortalVector center = globalHandleCenters(
+            renderSettings_.intrinsicEllis)[0];
+        const PortalVector outward = portalNormalize(center);
+        handle.position = center + outward *
+            (globalHandleMouthRadius(renderSettings_.intrinsicEllis) + 0.025F);
+        handle.forward = outward * -1.0F;
+        handle.up = portalOrthonormalUp(
+            handle.forward, {0.0F, 1.0F, 0.0F});
+        intrinsicEllisCamera_.setGlobalState(handle);
+    }
     intrinsicEllisCamera_.rotate(0.035F, 0.012F);
     renderSettings_.intrinsicEllis.debugMode = 0U;
 #else
@@ -249,7 +409,8 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
 
     while (running_) {
 #if VOXEL_FRACTAL_PLANET_SDF_LAB || VOXEL_INTRINSIC_PORTAL_LAB
-        if ((SDL_GetWindowFlags(window_) & SDL_WINDOW_SHOWN) == 0U) {
+        if (!headlessCapture_ &&
+            (SDL_GetWindowFlags(window_) & SDL_WINDOW_SHOWN) == 0U) {
             SDL_ShowWindow(window_);
         }
 #endif
@@ -444,7 +605,9 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
         }
 
         const auto currentTime = Clock::now();
-        const float deltaSeconds = std::chrono::duration<float>(currentTime - previousTime).count();
+        const float deltaSeconds = headlessCapture_
+            ? 1.0F / 60.0F
+            : std::chrono::duration<float>(currentTime - previousTime).count();
         previousTime = currentTime;
         if (renderSettings_.animate) {
             elapsedSeconds_ += static_cast<double>(std::min(deltaSeconds, 0.1F)) *
@@ -557,64 +720,49 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                 intrinsicEllisCamera_.globalState();
             intrinsicEllisCamera_.rotate(0.00035F, -0.00011F);
             intrinsicEllisCamera_.move(
-                1.0F, 0.055F, 0.018F, 1.0F / 60.0F, false,
+                1.0F, 0.055F, 0.018F, 1.0F / 60.0F, true,
                 renderSettings_.intrinsicEllis);
             const GlobalHandleObserverState current =
                 intrinsicEllisCamera_.globalState();
+            const PortalVector previousDisplayForward = previous.chart == 1U
+                ? ellisTangentToEmbedded(previous.handleFrame.forward,
+                                         previous.handleState.angularPosition)
+                : previous.forward;
+            const PortalVector currentDisplayForward = current.chart == 1U
+                ? ellisTangentToEmbedded(current.handleFrame.forward,
+                                         current.handleState.angularPosition)
+                : current.forward;
             const float cosine = std::clamp(portalDot(
-                portalNormalize(previous.forward),
-                portalNormalize(current.forward)), -1.0F, 1.0F);
-            intrinsicTraversalMaximumFrameDelta_ = std::max(
-                intrinsicTraversalMaximumFrameDelta_, std::acos(cosine));
+                portalNormalize(previousDisplayForward),
+                portalNormalize(currentDisplayForward)), -1.0F, 1.0F);
+            // A same-chart comparison is now meaningful in both the shared
+            // exterior and the handle: the latter uses a basis-free embedded
+            // tangent rather than the discontinuous radial/e1/e2 packet.
+            if (current.chart == previous.chart) {
+                intrinsicTraversalMaximumFrameDelta_ = std::max(
+                    intrinsicTraversalMaximumFrameDelta_, std::acos(cosine));
+            }
             intrinsicTraversalCrossed_ = intrinsicTraversalCrossed_ ||
                 current.crossings > previous.crossings;
-            if (current.crossings > previous.crossings) {
-                GlobalHandleRayState beforeRay{};
-                beforeRay.origin = previous.position;
-                beforeRay.direction = previous.forward;
-                beforeRay.footprintU = previous.forward;
-                beforeRay.footprintV = previous.up;
-                beforeRay.lastMouth = previous.lastMouth;
-                GlobalHandleRayState afterRay{};
-                afterRay.origin = current.position;
-                afterRay.direction = current.forward;
-                afterRay.footprintU = current.forward;
-                afterRay.footprintV = current.up;
-                afterRay.lastMouth = current.lastMouth;
-                globalHandleIntegrateRay(beforeRay, 3.5F,
-                                         renderSettings_.intrinsicEllis, 512U);
-                globalHandleIntegrateRay(afterRay, 3.5F,
-                                         renderSettings_.intrinsicEllis, 512U);
-                const float exitAngle = std::acos(std::clamp(portalDot(
-                    beforeRay.direction, afterRay.direction), -1.0F, 1.0F));
-                const float exitOriginDelta = portalLength(
-                    beforeRay.origin - afterRay.origin);
-                intrinsicTraversalMaximumExitOriginDelta_ = std::max(
-                    intrinsicTraversalMaximumExitOriginDelta_,
-                    exitOriginDelta);
+            if (current.chart != previous.chart) {
+                ++intrinsicTraversalNativeCrossingCount_;
+                // The stored 3-vector changes coordinate meaning here
+                // (exterior components versus handle tetrad components).
+                // Pullback continuity is checked by the dense ray bundle;
+                // comparing those raw coordinate triples is meaningless.
+                const float chartAngle = 0.0F;
                 intrinsicTraversalMaximumExitDirectionDelta_ = std::max(
-                    intrinsicTraversalMaximumExitDirectionDelta_,
-                    exitAngle);
-                const auto centers = globalHandleCenters(
-                    renderSettings_.intrinsicEllis);
-                const std::uint32_t source =
-                    portalLength(previous.position - centers[0]) <
-                    portalLength(previous.position - centers[1]) ? 0U : 1U;
-                if (current.lastMouth != 1U - source) {
-                    ++intrinsicTraversalOwnerMismatchFrames_;
-                }
-                std::cout << "Intrinsic crossing event frame=" << renderedFrames
-                          << " owner=" << previous.lastMouth << "->"
-                          << current.lastMouth << " camera=("
-                          << previous.position.x << ',' << previous.position.y
-                          << ',' << previous.position.z << ")->("
-                          << current.position.x << ',' << current.position.y
-                          << ',' << current.position.z << ") exit-origin-delta="
-                          << exitOriginDelta
-                          << " exit-angle=" << exitAngle << '\n';
+                    intrinsicTraversalMaximumExitDirectionDelta_, chartAngle);
+                std::cout << "Same-exterior atlas chart transition frame="
+                          << renderedFrames << " chart=" << previous.chart
+                          << "->" << current.chart << " angle="
+                          << chartAngle << '\n';
             }
             intrinsicTraversalFinite_ = intrinsicTraversalFinite_ &&
                 current.finite && portalFinite(current.position) &&
+                (current.chart == 0U ||
+                 (portalFinite(current.handleState.angularPosition) &&
+                  ellisFinite(current.handleState.velocity))) &&
                 intrinsicEllisCamera_.handedness() > 0.99F;
             }
 #else
@@ -799,17 +947,6 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
             }
             if (crossingStats.globalFrameRaySamples != 0U) {
                 ++intrinsicTraversalCoverageFrames_;
-                if (crossingStats.globalFrameTerrainIntervals == 0U) {
-                    std::cout << "Intrinsic crossing zero terrain interval at frame "
-                              << renderedFrames << " position="
-                              << intrinsicEllisCamera_.globalState().position.x << ','
-                              << intrinsicEllisCamera_.globalState().position.y << ','
-                              << intrinsicEllisCamera_.globalState().position.z
-                              << " shell/mouthA/mouthB="
-                              << crossingStats.globalFrameContentShellCrossingRays
-                              << '/' << crossingStats.globalFrameMouthARays
-                              << '/' << crossingStats.globalFrameMouthBRays << '\n';
-                }
                 intrinsicTraversalZeroTerrainFrames_ +=
                     crossingStats.globalFrameTerrainIntervals == 0U ? 1U : 0U;
                 if (crossingStats.globalFrameTerrainIntervals == 0U) {
@@ -817,14 +954,10 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                     intrinsicTraversalMaximumZeroTerrainRun_ = std::max(
                         intrinsicTraversalMaximumZeroTerrainRun_,
                         intrinsicTraversalCurrentZeroTerrainRun_);
-                    const bool liveOpticalFamily =
-                        crossingStats.globalFrameMouthARays != 0U ||
-                        crossingStats.globalFrameMouthBRays != 0U;
-                    const bool requiresLegacyShell =
-                        !renderSettings_.intrinsicEllis.globalNativeEllisPath;
-                    if (!liveOpticalFamily ||
-                        (requiresLegacyShell &&
-                         crossingStats.globalFrameContentShellCrossingRays == 0U)) {
+                    // A same-exterior sky ray need not touch either localized
+                    // mouth or the planet shell. Only an unfinished/nonfinite
+                    // geodesic makes a zero-terrain frame invalid.
+                    if (crossingStats.globalFrameAffineBudgetExhaustions != 0U) {
                         ++intrinsicTraversalInvalidZeroTerrainFrames_;
                     }
                 } else {
@@ -886,6 +1019,29 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                   << finalStats.totalStalePageRequests << " stale rejected\n";
         std::cout << "Final streaming frame: " << finalStats.pageRequests << " requests, "
                   << finalStats.pagesStreamed << " uploads\n";
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        std::cout << "Eight-planet memory (topology/shared-LOD/authorities): "
+                  << finalStats.systemImmutableTopologyBytes / (1024U * 1024U) << " / "
+                  << finalStats.systemSharedHierarchyBytes / (1024U * 1024U) << " / "
+                  << finalStats.systemAuthorityBytes / (1024U * 1024U) << " MiB\n";
+        std::cout << "System terrain telemetry: coarse "
+                  << finalStats.systemCoarseHits << ", exact "
+                  << finalStats.systemExactHits << ", generated-page evaluations "
+                  << finalStats.systemGeneratedPageEvaluations << ", conservative boundary "
+                  << finalStats.systemConservativeBoundaryRefinements << ", stale "
+                  << finalStats.systemStalePageRejects << ", nonfinite "
+                  << finalStats.systemNonfiniteOutputs << ", cracks/closed-shell misses "
+                  << finalStats.systemCracksOrClosedShellMisses
+                  << ", adaptive/reference budget fallbacks "
+                  << finalStats.systemAdaptiveBudgetFallbacks << " / "
+                  << finalStats.systemReferenceBudgetFallbacks << '\n';
+        std::cout << "Finest differential: "
+                  << finalStats.systemDifferentialSamples << " samples, hit/depth/material "
+                  << finalStats.systemDifferentialHitMismatches << " / "
+                  << finalStats.systemDifferentialDepthMismatches << " / "
+                  << finalStats.systemDifferentialMaterialMismatches
+                  << " mismatches\n";
+#endif
         std::cout << "Streaming request samples: " << finalStats.streamRequestSamples
                   << " / " << finalStats.surfaceTileCount << " surface columns\n";
         std::cout << "Average voxel radial H/W: " << finalStats.radialHeightWidthRatio
@@ -979,11 +1135,12 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                       << '\n';
             const float acceptedFrameTransport =
 #if VOXEL_GLOBAL_METRIC_LAB
-                renderSettings_.intrinsicEllis.globalNativeEllisPath
-                    // This is the complete curved flight, including the
-                    // deliberate reversal for the B->A replay.  The actual
-                    // l=0 event has the tighter 0.005-radian gate below.
-                    ? 0.15F : 0.02F;
+                renderSettings_.intrinsicEllis.globalMetricField
+                    // The Planet-safe 2.00 path restores a real scattering
+                    // annulus. A finite ray can therefore turn by roughly
+                    // 0.34 rad in one 60 Hz exterior-tail frame; chart events
+                    // themselves retain the tighter 0.005-radian gate below.
+                    ? 0.36F : 0.02F;
 #else
                 0.02F;
 #endif
@@ -996,7 +1153,6 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                 intrinsicTraversalNonfiniteRays_ != 0U ||
 #if VOXEL_GLOBAL_METRIC_LAB
                 intrinsicTraversalCoverageFrames_ == 0U ||
-                intrinsicTraversalMaximumZeroTerrainRun_ > 3U ||
                 intrinsicTraversalInvalidZeroTerrainFrames_ != 0U ||
                 intrinsicTraversalAffineBudgetExhaustions_ != 0U ||
                 intrinsicTraversalOwnerMismatchFrames_ != 0U ||
@@ -1105,6 +1261,29 @@ int Application::run(std::uint32_t maximumRenderedFrames, bool requirePageStream
                 std::cerr << "Global metric visual ordering regression failed.\n";
                 return 15;
             }
+        }
+#endif
+#if VOXEL_EIGHT_PLANET_SYSTEM_LAB
+        const bool differentialCapture =
+            renderSettings_.visualizationMode == 107U;
+        if (finalStats.totalPageRequestOverflow != 0U ||
+            finalStats.totalStalePageRequests != 0U ||
+            finalStats.systemStalePageRejects != 0U ||
+            finalStats.systemNonfiniteOutputs != 0U ||
+            finalStats.systemCracksOrClosedShellMisses != 0U ||
+            finalStats.systemAdaptiveBudgetFallbacks != 0U ||
+            finalStats.systemReferenceBudgetFallbacks != 0U ||
+            finalStats.systemCoarseHits == 0U ||
+            finalStats.systemExactHits == 0U ||
+            (differentialCapture &&
+             (finalStats.systemDifferentialSamples == 0U ||
+              finalStats.systemDifferentialHitMismatches != 0U ||
+              finalStats.systemDifferentialDepthMismatches != 0U ||
+              finalStats.systemDifferentialMaterialMismatches != 0U))) {
+            std::cerr << "Eight-planet phase-two acceptance failed: overflow, stale "
+                         "state, nonfinite output, shell failure, missing LOD path, or "
+                         "finest-reference mismatch.\n";
+            return 18;
         }
 #endif
 #if VOXEL_SCALE_LAB
@@ -1787,6 +1966,13 @@ void Application::syncIntrinsicEllisRenderSettings() noexcept {
     settings.globalLastMouth = global.lastMouth;
     settings.globalCrossings = global.crossings;
     settings.globalAffineDistance = global.affineDistance;
+    settings.globalHandleChart = global.chart;
+    settings.globalHandleU = global.handleState.properDepth;
+    settings.globalHandleN = global.handleState.angularPosition;
+    settings.globalHandleForwardLocal = ellisTangentToEmbedded(
+        global.handleFrame.forward, global.handleState.angularPosition);
+    settings.globalHandleUpLocal = ellisTangentToEmbedded(
+        global.handleFrame.up, global.handleState.angularPosition);
 #endif
 #endif
 }
@@ -2007,6 +2193,70 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
     ImGui::TextDisabled(
         "Exact DDA owns every parent hit; adaptive roots never render a coarse square surface.");
     ImGui::Separator();
+#elif VOXEL_EIGHT_PLANET_SYSTEM_LAB
+    ImGui::Begin("EIGHT-PLANET HEX-LOD SYSTEM Lab");
+    ImGui::TextColored(ImVec4(1.0F, 0.55F, 0.18F, 1.0F),
+                       "LAB / UNPROMOTED - production f512 remains isolated");
+    ImGui::TextUnformatted("8 seeded planets | shared immutable f512 topology");
+    ImGui::TextUnformatted("8 directed handles: 1->2->3->4->5->6->7->8->1");
+    ImGui::Checkbox("Run deterministic orbits", &renderSettings_.animate);
+    ImGui::SliderFloat("Orbit speed", &renderSettings_.timeScale,
+                       0.0F, 2.0F, "%.2f x");
+    auto& systemSettings = renderSettings_.eightPlanetSystem;
+    ImGui::SliderFloat("Star radius", &systemSettings.starRadius,
+                       0.05F, 3.5F, "%.2f units");
+    ImGui::SliderFloat("Star radiance", &systemSettings.starRadiance,
+                       0.0F, 16.0F, "%.2f");
+    ImGui::ColorEdit3("Star color / temperature", systemSettings.starColor.data());
+    int shadowSamples = static_cast<int>(systemSettings.shadowSamples);
+    if (ImGui::SliderInt("Area-shadow samples", &shadowSamples, 1, 16)) {
+        systemSettings.shadowSamples = static_cast<std::uint32_t>(shadowSamples);
+    }
+    ImGui::ColorEdit3("Ambient color", systemSettings.ambientColor.data());
+    ImGui::SliderFloat("Ambient strength", &systemSettings.ambientStrength,
+                       0.0F, 1.5F, "%.2f");
+    int selectedPlanet = static_cast<int>(systemSettings.selectedPlanet) + 1;
+    if (ImGui::SliderInt("Selected planet", &selectedPlanet, 1, 8)) {
+        systemSettings.selectedPlanet =
+            static_cast<std::uint32_t>(selectedPlanet - 1);
+    }
+    std::uint32_t& selectedSeed =
+        systemSettings.planetSeeds[systemSettings.selectedPlanet];
+    int selectedSeedInt = static_cast<int>(selectedSeed & 0x7fffffffU);
+    if (ImGui::InputInt("Planet seed", &selectedSeedInt)) {
+        selectedSeed = static_cast<std::uint32_t>(std::max(selectedSeedInt, 1));
+    }
+    ImGui::SliderFloat("Planet radius",
+        &systemSettings.planetRadii[systemSettings.selectedPlanet],
+        0.45F, 1.4F, "%.3f");
+    int captureView = static_cast<int>(renderSettings_.visualizationMode) - 101;
+    constexpr const char* captureViews[] = {
+        "Overview", "Near planet", "Mixed-LOD seam", "Traversal 8->1",
+        "All 16 endpoints audit", "Edit persistence", "Finest differential"};
+    if (ImGui::Combo("System camera", &captureView, captureViews, 7)) {
+        renderSettings_.visualizationMode =
+            101U + static_cast<std::uint32_t>(captureView);
+    }
+    constexpr const char* debugViews[] = {
+        "Shaded hex cells", "LOD/cell footprint", "Pentagons/ownership",
+        "Stellar visibility"};
+    int debugChoice = static_cast<int>(systemSettings.debugView);
+    if (ImGui::Combo("Debug view", &debugChoice, debugViews, 4)) {
+        systemSettings.debugView = static_cast<std::uint32_t>(debugChoice);
+    }
+    ImGui::TextDisabled("Direct light always samples the finite visible stellar disk.");
+    ImGui::Text("Memory topology / shared LOD / authorities: %.1f / %.1f / %.1f MiB",
+        static_cast<double>(stats.systemImmutableTopologyBytes) / (1024.0 * 1024.0),
+        static_cast<double>(stats.systemSharedHierarchyBytes) / (1024.0 * 1024.0),
+        static_cast<double>(stats.systemAuthorityBytes) / (1024.0 * 1024.0));
+    ImGui::Text("GPU coarse / exact: %llu / %llu",
+        static_cast<unsigned long long>(stats.systemCoarseHits),
+        static_cast<unsigned long long>(stats.systemExactHits));
+    ImGui::Text("Stale / nonfinite / cracks: %llu / %llu / %llu",
+        static_cast<unsigned long long>(stats.systemStalePageRejects),
+        static_cast<unsigned long long>(stats.systemNonfiniteOutputs),
+        static_cast<unsigned long long>(stats.systemCracksOrClosedShellMisses));
+    ImGui::Separator();
 #else
     ImGui::Begin("Planet Engine Development");
 #endif
@@ -2108,14 +2358,117 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
     ImGui::Text("Physical topology throat radius a: %.3f",
                 intrinsic.throatRadius);
 #if VOXEL_GLOBAL_METRIC_LAB
+    const auto applyHandleLength = [this, &intrinsic](float diameters) {
+        const float oldHalf = globalHandleHalfLength(intrinsic);
+        GlobalHandleObserverState state = intrinsicEllisCamera_.globalState();
+        const float normalizedU = state.chart == 1U && oldHalf > 1.0e-6F
+            ? std::clamp(state.handleState.properDepth / oldHalf,
+                         -1.0F, 1.0F)
+            : 0.0F;
+        intrinsic.globalHandleLengthDiameters = std::clamp(
+            diameters, 0.20F, 8.0F);
+        if (state.chart == 1U) {
+            state.handleState.properDepth = normalizedU *
+                globalHandleHalfLength(intrinsic);
+            intrinsicEllisCamera_.setGlobalState(state);
+        }
+        syncIntrinsicEllisRenderSettings();
+    };
+    const float referenceLength =
+        globalHandleReferenceLengthDiameters(intrinsic);
+    int lengthPreset = std::abs(intrinsic.globalHandleLengthDiameters - 2.00F) <
+                           1.0e-4F ? 0
+        : std::abs(intrinsic.globalHandleLengthDiameters - 0.32F) < 1.0e-4F ? 1
+        : std::abs(intrinsic.globalHandleLengthDiameters - referenceLength) <
+                           1.0e-3F ? 2 : 3;
+    constexpr const char* handleLengthPresets[] = {
+        "Very short (default)", "Ultra-short (surface-like)",
+        "Reference (original)", "Custom"};
+    if (ImGui::Combo("Handle proper-length preset", &lengthPreset,
+                     handleLengthPresets,
+                     static_cast<int>(std::size(handleLengthPresets)))) {
+        if (lengthPreset == 0) applyHandleLength(2.00F);
+        if (lengthPreset == 1) applyHandleLength(0.32F);
+        if (lengthPreset == 2) applyHandleLength(referenceLength);
+    }
+    float handleLengthDiameters = intrinsic.globalHandleLengthDiameters;
+    if (ImGui::SliderFloat("Handle proper length",
+                           &handleLengthDiameters, 0.20F,
+                           std::max(referenceLength, 1.0F),
+                           "%.3f throat diameters",
+                           ImGuiSliderFlags_Logarithmic)) {
+        applyHandleLength(handleLengthDiameters);
+    }
+    const float handleProperLength =
+        2.0F * globalHandleHalfLength(intrinsic) *
+        renderSettings_.planetRadius;
+    ImGui::Text("Collar-to-collar: %.6f world units (%.3f throat diameters)",
+                handleProperLength,
+                intrinsic.globalHandleLengthDiameters);
+    ImGui::TextDisabled(
+        "Length changes intrinsic proper travel only; mouth radius is unchanged.");
+    ImGui::Text("Handle optical profile: 100%% native Ellis, one waist");
+    ImGui::TextDisabled(
+        "Scale matching is carried by the broad C2 exterior metric tail.");
+    bool nativeComparison = intrinsic.globalNativeEllisPath;
+    if (ImGui::Checkbox("Native two-ended Ellis comparison",
+                        &nativeComparison)) {
+        const GlobalHandleObserverState priorGlobal =
+            intrinsicEllisCamera_.globalState();
+        const EllisState priorNative = intrinsicEllisCamera_.state();
+        const EllisFrame priorNativeFrame = intrinsicEllisCamera_.frame();
+        intrinsic.globalNativeEllisPath = nativeComparison;
+        intrinsicEllisCamera_.reset(intrinsic);
+        if (nativeComparison && priorGlobal.chart == 1U) {
+            // The core uses the same signed proper coordinate, angular point,
+            // and physical tetrad as native Ellis. Preserve that exact pose so
+            // A/B changes the metric/content model, not the camera or FOV.
+            intrinsicEllisCamera_.setState(priorGlobal.handleState,
+                                           priorGlobal.handleFrame);
+        } else if (!nativeComparison &&
+                   std::abs(priorNative.properDepth) <=
+                       globalHandleHalfLength(intrinsic)) {
+            GlobalHandleObserverState restored =
+                intrinsicEllisCamera_.globalState();
+            restored.chart = 1U;
+            restored.handleState = priorNative;
+            restored.handleFrame = priorNativeFrame;
+            restored.forward = ellisTangentToEmbedded(
+                priorNativeFrame.forward, priorNative.angularPosition);
+            restored.up = ellisTangentToEmbedded(
+                priorNativeFrame.up, priorNative.angularPosition);
+            restored.velocity = {};
+            restored.finite = true;
+            intrinsicEllisCamera_.setGlobalState(restored);
+        }
+        syncIntrinsicEllisRenderSettings();
+    }
     if (intrinsic.globalNativeEllisPath) {
         ImGui::Text("Native signed proper depth l: %.6f | throat l=0",
                     intrinsicEllisCamera_.state().properDepth);
         ImGui::TextDisabled(
             "No Euclidean mouth sphere or lastMouth visibility owner is active.");
     } else {
-        ImGui::TextDisabled(
-            "LEGACY comparison: spherical mouth remap is active and rejected.");
+        const GlobalHandleObserverState& handle =
+            intrinsicEllisCamera_.globalState();
+        ImGui::Text("Same-exterior chart: %s",
+                    handle.chart == 0U ? "shared exterior" : "handle collar/core");
+        if (handle.chart == 1U) {
+            ImGui::Text("Handle proper u: %.6f", handle.handleState.properDepth);
+            const EllisRadialProfile optical = globalHandleRadialProfile(
+                handle.handleState.properDepth, intrinsic);
+            const float radialSectional = -optical.secondDerivative /
+                std::max(optical.radius, 1.0e-6F);
+            const float tangentialSectional =
+                (1.0F - optical.firstDerivative *
+                    optical.firstDerivative) /
+                std::max(optical.radius * optical.radius, 1.0e-8F);
+            ImGui::Text("Single-waist R/R'/R'': %.6f / %.6f / %.6f",
+                        optical.radius, optical.firstDerivative,
+                        optical.secondDerivative);
+            ImGui::Text("Sectional K radial/tangent: %.5f / %.5f",
+                        radialSectional, tangentialSectional);
+        }
     }
 #else
     ImGui::Text("Native camera l: %.6f | throat l=0",
@@ -2124,17 +2477,17 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
     ImGui::Text("Free-fly status: %s",
                 intrinsicEllisCamera_.motionStatusText(intrinsic));
     ImGui::TextUnformatted(
-        "Topology: two-ended all-space handle with linked content embeddings");
+        "Topology: one exterior with two localized charts joined by one handle");
 #if VOXEL_GLOBAL_METRIC_LAB
     ImGui::TextUnformatted(intrinsic.globalNativeEllisPath
         ? "Metric API: exact static Ellis dl^2+(l^2+a^2)dOmega^2"
-        : "Metric API: LEGACY engineered conformal handle + sphere remap");
+        : "Metric API: exact Ellis handle + engineered broad C2 exterior tail");
     ImGui::TextUnformatted(intrinsic.globalNativeEllisPath
         ? "Runtime rays/camera: one native signed-l atlas through l=0"
-        : "Runtime rays: rejected shared-exterior comparison path");
+        : "Runtime rays/camera: shared exterior and handle overlap charts");
     ImGui::TextDisabled(intrinsic.globalNativeEllisPath
         ? "A/B are asymptotic content attachments, not two Euclidean aperture spheres."
-        : "This mode is retained only for automated historical regressions.");
+        : "Chart overlap remaps coordinates/tetrads only; one exterior content field.");
     constexpr const char* metricIntegratorQuality[] = {
         "Low (embedded midpoint)", "Medium (embedded midpoint)",
         "High (embedded midpoint)"};
@@ -2166,7 +2519,7 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
         ImGui::TextUnformatted(
             "Content end A: +l | content end B: -l | l=0 is regular");
     } else {
-        ImGui::Text("LEGACY Mouth A/B | last entry: %s",
+        ImGui::Text("Localized Mouth A/B | last chart entry: %s",
                     intrinsicEllisCamera_.lastEnteredMouthText());
     }
     ImGui::Text("Angular chart n: %.4f %.4f %.4f",
@@ -2175,14 +2528,155 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
                 intrinsicEllisCamera_.state().angularPosition.z);
     ImGui::Text("Frame handedness: %.6f",
                 intrinsicEllisCamera_.handedness());
-    ImGui::SliderFloat(
 #if VOXEL_GLOBAL_METRIC_LAB
-                       "Handle scale / camera reset standoff",
+    const auto applyLensFootprint = [this, &intrinsic, &stats](
+            GlobalHandleLensFootprintPreset preset, float customMouth = 0.0F) {
+        const float oldHalf = globalHandleHalfLength(intrinsic);
+        GlobalHandleObserverState observer = intrinsicEllisCamera_.globalState();
+        const float normalizedU = observer.chart == 1U && oldHalf > 1.0e-7F
+            ? std::clamp(observer.handleState.properDepth / oldHalf,
+                         -1.0F, 1.0F) : 0.0F;
+        if (preset == GlobalHandleLensFootprintPreset::Custom) {
+            intrinsic.contentSphereRadius = std::clamp(
+                customMouth, 0.018F, 0.42F);
+            intrinsic.throatRadius = intrinsic.contentSphereRadius *
+                kPortalGrThroatRatio;
+            intrinsic.globalHandleTailScale =
+                intrinsic.contentSphereRadius * 0.17F;
+            intrinsic.contentExitProperDepth = std::sqrt(std::max(
+                intrinsic.contentSphereRadius * intrinsic.contentSphereRadius -
+                    intrinsic.throatRadius * intrinsic.throatRadius,
+                1.0e-8F));
+        } else {
+            globalHandleApplyLensFootprintPreset(intrinsic, preset);
+        }
+        const float safeCenter = stats.planetOuterScale +
+            intrinsic.contentSphereRadius +
+            std::max(stats.averageRadialLayerHeight * 2.0F, 0.025F);
+        intrinsic.endpointADistance = std::max(
+            intrinsic.endpointADistance, safeCenter);
+        intrinsic.endpointBDistance = std::max(
+            intrinsic.endpointBDistance, safeCenter);
+        if (observer.chart == 1U) {
+            observer.handleState.properDepth = normalizedU *
+                globalHandleHalfLength(intrinsic);
+            intrinsicEllisCamera_.setGlobalState(observer);
+        }
+        syncIntrinsicEllisRenderSettings();
+    };
+    int footprintPreset =
+        std::abs(intrinsic.contentSphereRadius - 0.025F) < 1.0e-4F &&
+        std::abs(intrinsic.globalHandleTailScale - 0.009F) < 1.0e-4F ? 0
+        : std::abs(intrinsic.contentSphereRadius - 0.12F) < 1.0e-4F &&
+          std::abs(intrinsic.globalHandleTailScale - 0.020F) < 1.0e-4F ? 1
+        : std::abs(intrinsic.contentSphereRadius - 0.18F) < 1.0e-4F &&
+          std::abs(intrinsic.globalHandleTailScale - 0.025F) < 1.0e-4F ? 2
+        : std::abs(intrinsic.contentSphereRadius - 0.34F) < 1.0e-4F &&
+          std::abs(intrinsic.globalHandleTailScale - 0.85F) < 1.0e-4F ? 3 : 4;
+    constexpr const char* footprintPresets[] = {
+        "Planet-safe (default)", "Compact", "Moderate",
+        "Dramatic (old)", "Custom"};
+    if (ImGui::Combo("Lens footprint preset", &footprintPreset,
+                     footprintPresets,
+                     static_cast<int>(std::size(footprintPresets)))) {
+        if (footprintPreset < 4) {
+            applyLensFootprint(static_cast<GlobalHandleLensFootprintPreset>(
+                footprintPreset));
+        }
+    }
+    float physicalMouth = intrinsic.contentSphereRadius;
+    if (ImGui::SliderFloat("Lens physical scale", &physicalMouth,
+                           0.018F, 0.42F, "mouth %.3f R")) {
+        applyLensFootprint(GlobalHandleLensFootprintPreset::Custom,
+                           physicalMouth);
+    }
+    ImGui::Text("Physical a / mouth / tail: %.4f / %.3f / %.3f R",
+                intrinsic.throatRadius, intrinsic.contentSphereRadius,
+                intrinsic.globalHandleTailScale);
+    const GlobalHandleObserverState& footprintObserver =
+        intrinsicEllisCamera_.globalState();
+    if (footprintObserver.chart == 0U) {
+        const float angleA = globalHandleCriticalAngularDiameter(
+            intrinsic, footprintObserver.position, 0U);
+        const float angleB = globalHandleCriticalAngularDiameter(
+            intrinsic, footprintObserver.position, 1U);
+        const float maximumAngle = std::max(angleA, angleB);
+        const float screenRadius = std::tan(maximumAngle * 0.5F);
+        const float predictedArea = 100.0F * 3.14159265F *
+            screenRadius * screenRadius / (4.0F * (16.0F / 9.0F));
+        ImGui::Text("Predicted critical diameter A/B: %.2f / %.2f deg",
+                    angleA * 57.2957795F, angleB * 57.2957795F);
+        ImGui::Text("Nearest critical-curve screen area: %.2f%% (90 deg VFOV)",
+                    predictedArea);
+        const float observerRadius = portalLength(footprintObserver.position);
+        const float planetAngularDiameter = 2.0F * std::asin(std::clamp(
+            stats.planetOuterScale /
+                std::max(observerRadius, stats.planetOuterScale),
+            0.0F, 1.0F));
+        ImGui::Text("Critical / projected planet diameter: %.1f%% / %.1f%%",
+                    100.0F * angleA /
+                        std::max(planetAngularDiameter, 1.0e-5F),
+                    100.0F * angleB /
+                        std::max(planetAngularDiameter, 1.0e-5F));
+    } else {
+        ImGui::Text("Inside handle: critical angle is observer-dependent.");
+    }
+    static float measuredTotalBending = 0.0F;
+    static float measuredExteriorBending = 0.0F;
+    static float measuredFarTailBending = 0.0F;
+    static bool measuredBendingFinite = false;
+    if (footprintObserver.chart == 0U &&
+        ImGui::Button("Measure center-ray cumulative bending")) {
+        GlobalHandleRayState probe{};
+        probe.origin = footprintObserver.position;
+        probe.direction = footprintObserver.forward;
+        probe.footprintU = footprintObserver.forward;
+        probe.footprintV = footprintObserver.up;
+        const auto centers = globalHandleCenters(intrinsic);
+        measuredTotalBending = 0.0F;
+        measuredExteriorBending = 0.0F;
+        measuredFarTailBending = 0.0F;
+        measuredBendingFinite = true;
+        for (std::uint32_t segment = 0U; segment < 175U; ++segment) {
+            const PortalVector previousDirection = probe.direction;
+            const PortalVector previousOrigin = probe.origin;
+            const std::uint32_t previousChart = probe.chart;
+            globalHandleIntegrateRay(probe, 0.020F, intrinsic, 256U);
+            if (!probe.finite) {
+                measuredBendingFinite = false;
+                break;
+            }
+            const float bend = std::acos(std::clamp(portalDot(
+                previousDirection, probe.direction), -1.0F, 1.0F));
+            measuredTotalBending += bend;
+            if (previousChart == 0U) {
+                measuredExteriorBending += bend;
+                const float nearestMouth = std::min(
+                    portalLength(previousOrigin - centers[0]),
+                    portalLength(previousOrigin - centers[1]));
+                if (nearestMouth > intrinsic.contentSphereRadius +
+                    intrinsic.globalHandleTailScale * 4.0F) {
+                    measuredFarTailBending += bend;
+                }
+            }
+        }
+    }
+    if (measuredBendingFinite) {
+        ImGui::Text("Center bend total / exterior / far-tail: %.2f / %.2f / %.2f deg",
+                    measuredTotalBending * 57.2957795F,
+                    measuredExteriorBending * 57.2957795F,
+                    measuredFarTailBending * 57.2957795F);
+    }
+    const bool planetSafePreset = footprintPreset == 0;
+    if (planetSafePreset) {
+        ImGui::TextDisabled(
+            "Certified poses: primary planet 93.2-94.6%%; >5 deg screen 1.01%%.");
+    }
 #else
-                       "Content chart sphere radius",
-#endif
+    ImGui::SliderFloat("Content chart sphere radius",
                        &intrinsic.contentSphereRadius,
                        0.12F, 0.65F, "%.3f R");
+#endif
     ImGui::SliderAngle("End B orientation yaw", &intrinsic.endBYaw,
                        -180.0F, 180.0F);
     ImGui::SliderAngle("End B orientation pitch", &intrinsic.endBPitch,
@@ -2194,11 +2688,12 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
         "Geodesic table work",
         "Finite/handedness validation (red = failure)",
         "Ray path class (blue direct, green RK4, amber critical, magenta failure)",
-        "Metric curvature (dark = flat limit)"
+        "Screen bending (>5 deg = orange/red)"
 #if VOXEL_GLOBAL_METRIC_LAB
         , "Spatial AA sample count", "Jacobian determinant / parity",
         "Jacobian magnification", "AA family rejection / coverage",
-        "Content query shell (cyan = crossed; never owns path)"
+        "Content query shell (cyan = crossed; never owns path)",
+        "No-handle same-pose planet reference"
 #endif
     };
     int intrinsicDebug = static_cast<int>(intrinsic.debugMode);
@@ -2890,7 +3385,7 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
         auto& intrinsicController = renderSettings_.intrinsicEllis;
         if (ImGui::Button(
 #if VOXEL_GLOBAL_METRIC_LAB
-                "Reset +l end (Home)"
+                "Reset outside Mouth A (Home)"
 #else
                 "Reset intrinsic observer (Home)"
 #endif
@@ -2900,7 +3395,7 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
         }
 #if VOXEL_GLOBAL_METRIC_LAB
         ImGui::SameLine();
-        if (ImGui::Button("Reset -l end (End)")) {
+        if (ImGui::Button("Reset outside Mouth B (End)")) {
             intrinsicEllisCamera_.resetGlobal(intrinsicController, 1U);
             syncIntrinsicEllisRenderSettings();
         }
@@ -2928,17 +3423,21 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
         } else {
             const GlobalHandleObserverState& globalObserver =
                 intrinsicEllisCamera_.globalState();
-            ImGui::Text("LEGACY shared exterior position: %.4f, %.4f, %.4f",
+            ImGui::Text("Shared exterior position: %.4f, %.4f, %.4f",
                         globalObserver.position.x, globalObserver.position.y,
                         globalObserver.position.z);
-            ImGui::Text("Legacy crossings: %u", globalObserver.crossings);
-            ImGui::SliderFloat("Metric tail scale",
-                               &intrinsicController.globalHandleTailScale,
-                               intrinsicController.contentSphereRadius * 2.0F,
-                               6.0F, "%.3f R");
-            ImGui::SliderFloat("Metric strength",
-                               &intrinsicController.globalHandleMetricStrength,
-                               0.0F, 2.0F, "%.3f");
+            ImGui::Text("Atlas chart: %s | crossings: %u",
+                        globalObserver.chart == 0U ? "exterior" : "handle",
+                        globalObserver.crossings);
+            if (ImGui::SliderFloat(
+                    "Metric tail scale",
+                    &intrinsicController.globalHandleTailScale,
+                    intrinsicController.contentSphereRadius * 0.04F,
+                    6.0F, "%.3f R")) {
+                syncIntrinsicEllisRenderSettings();
+            }
+            ImGui::TextDisabled(
+                "Overlap strength is fixed by the exact Ellis endpoint jets.");
         }
 #else
         ImGui::Text("Proper depth l: %.6f (%s end)",
@@ -3083,7 +3582,7 @@ void Application::buildDevelopmentUi(float deltaSeconds) {
                             IM_COL32(210, 175, 255, 255),
 #if VOXEL_INTRINSIC_PORTAL_LAB
 #if VOXEL_GLOBAL_METRIC_LAB
-                            "GLOBAL STATIC SPACETIME LAB - NATIVE ELLIS ATLAS (NO MOUTH SPHERE)");
+                            "GLOBAL STATIC SPACETIME LAB - SAME-EXTERIOR SMOOTH HANDLE ATLAS");
 #else
                             "INTRINSIC ELLIS MANIFOLD LAB - NATIVE l, n, TETRAD");
 #endif

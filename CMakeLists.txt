@@ -24,6 +24,8 @@ option(VOXEL_BUILD_INTRINSIC_PORTAL_LAB
        "Build the isolated native-coordinate Ellis manifold laboratory executable" OFF)
 option(VOXEL_BUILD_GLOBAL_METRIC_LAB
        "Build the isolated all-space static global metric-field laboratory" OFF)
+option(VOXEL_BUILD_EIGHT_PLANET_SYSTEM_LAB
+       "Build the isolated unpromoted eight-planet hex-LOD system laboratory" OFF)
 set(VOXEL_IMGUI_SOURCE_DIR "" CACHE PATH "Path to a Dear ImGui source tree")
 set(VOXEL_GEODESIC_FREQUENCY 512 CACHE STRING "Geodesic subdivision frequency")
 set(VOXEL_TILE_RADIAL_LAYERS 32 CACHE STRING "Resident radial voxel layers per surface column")
@@ -147,7 +149,7 @@ if(VOXEL_ENABLE_REFERENCE_TRAVERSAL)
 else()
     set(VOXEL_REFERENCE_TRAVERSAL_VALUE 0)
 endif()
-function(add_voxel_shader_set target_name output_subdir lookup_width lookup_height scale_lab adaptive_sdf_lab fractal_planet_sdf_lab fractal_voxel_sdf_lab portal_lab intrinsic_portal_lab global_metric_lab)
+function(add_voxel_shader_set target_name output_subdir lookup_width lookup_height scale_lab adaptive_sdf_lab fractal_planet_sdf_lab fractal_voxel_sdf_lab portal_lab intrinsic_portal_lab global_metric_lab system_lab)
     set(shader_outputs)
     foreach(shader IN LISTS VOXEL_SHADER_SOURCES)
         get_filename_component(shader_name "${shader}" NAME)
@@ -167,6 +169,7 @@ function(add_voxel_shader_set target_name output_subdir lookup_width lookup_heig
                     -DVOXEL_PORTAL_LAB=${portal_lab}
                     -DVOXEL_INTRINSIC_PORTAL_LAB=${intrinsic_portal_lab}
                     -DVOXEL_GLOBAL_METRIC_LAB=${global_metric_lab}
+                    -DVOXEL_EIGHT_PLANET_SYSTEM_LAB=${system_lab}
                     "${shader}" -o "${shader_output}"
             COMMAND "${SPIRV_VAL_EXECUTABLE}" --target-env vulkan1.2 "${shader_output}"
             DEPENDS "${shader}" ${VOXEL_SHADER_SHARED_SOURCES}
@@ -177,7 +180,7 @@ function(add_voxel_shader_set target_name output_subdir lookup_width lookup_heig
     add_custom_target(${target_name} DEPENDS ${shader_outputs})
 endfunction()
 
-add_voxel_shader_set(voxel_shaders shaders 512 256 0 0 0 0 0 0 0)
+add_voxel_shader_set(voxel_shaders shaders 512 256 0 0 0 0 0 0 0 0)
 
 set(VOXEL_ENGINE_SOURCES
     src/main.cpp
@@ -337,7 +340,7 @@ target_compile_definitions(voxel_engine PRIVATE
 )
 
 if(VOXEL_BUILD_SCALE_LAB)
-    add_voxel_shader_set(voxel_scale_lab_shaders shaders-scale-lab 1024 512 1 0 0 0 0 0 0)
+    add_voxel_shader_set(voxel_scale_lab_shaders shaders-scale-lab 1024 512 1 0 0 0 0 0 0 0)
     add_executable(voxel_engine_scale_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_scale_lab voxel_scale_lab_shaders)
     target_include_directories(voxel_engine_scale_lab PRIVATE src)
@@ -381,7 +384,7 @@ if(VOXEL_BUILD_SCALE_LAB)
 endif()
 
 if(VOXEL_BUILD_ADAPTIVE_SDF_LAB)
-    add_voxel_shader_set(voxel_adaptive_sdf_shaders shaders-adaptive-sdf 512 256 0 1 0 0 0 0 0)
+    add_voxel_shader_set(voxel_adaptive_sdf_shaders shaders-adaptive-sdf 512 256 0 1 0 0 0 0 0 0)
     add_executable(voxel_engine_adaptive_sdf_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_adaptive_sdf_lab voxel_adaptive_sdf_shaders)
     target_include_directories(voxel_engine_adaptive_sdf_lab PRIVATE src)
@@ -424,7 +427,7 @@ if(VOXEL_BUILD_ADAPTIVE_SDF_LAB)
 endif()
 
 if(VOXEL_BUILD_FRACTAL_PLANET_SDF_LAB)
-    add_voxel_shader_set(voxel_fractal_planet_sdf_shaders shaders-fractal-planet-sdf 512 256 0 0 1 0 0 0 0)
+    add_voxel_shader_set(voxel_fractal_planet_sdf_shaders shaders-fractal-planet-sdf 512 256 0 0 1 0 0 0 0 0)
     add_executable(voxel_engine_fractal_planet_sdf_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_fractal_planet_sdf_lab voxel_fractal_planet_sdf_shaders)
     target_include_directories(voxel_engine_fractal_planet_sdf_lab PRIVATE src)
@@ -467,7 +470,7 @@ if(VOXEL_BUILD_FRACTAL_PLANET_SDF_LAB)
 endif()
 
 if(VOXEL_BUILD_FRACTAL_VOXEL_SDF_LAB)
-    add_voxel_shader_set(voxel_fractal_voxel_sdf_shaders shaders-fractal-voxel-sdf 512 256 0 0 1 1 0 0 0)
+    add_voxel_shader_set(voxel_fractal_voxel_sdf_shaders shaders-fractal-voxel-sdf 512 256 0 0 1 1 0 0 0 0)
     add_executable(voxel_engine_fractal_voxel_sdf_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_fractal_voxel_sdf_lab voxel_fractal_voxel_sdf_shaders)
     target_include_directories(voxel_engine_fractal_voxel_sdf_lab PRIVATE src)
@@ -510,7 +513,7 @@ if(VOXEL_BUILD_FRACTAL_VOXEL_SDF_LAB)
 endif()
 
 if(VOXEL_BUILD_PORTAL_LAB)
-    add_voxel_shader_set(voxel_portal_lab_shaders shaders-portal-lab 512 256 0 0 0 0 1 0 0)
+    add_voxel_shader_set(voxel_portal_lab_shaders shaders-portal-lab 512 256 0 0 0 0 1 0 0 0)
     add_executable(voxel_engine_portal_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_portal_lab voxel_portal_lab_shaders)
     target_include_directories(voxel_engine_portal_lab PRIVATE src)
@@ -554,7 +557,7 @@ endif()
 
 if(VOXEL_BUILD_INTRINSIC_PORTAL_LAB)
     add_voxel_shader_set(voxel_intrinsic_portal_lab_shaders
-        shaders-intrinsic-portal-lab 512 256 0 0 0 0 1 1 0)
+        shaders-intrinsic-portal-lab 512 256 0 0 0 0 1 1 0 0)
     add_executable(voxel_engine_intrinsic_portal_lab ${VOXEL_ENGINE_SOURCES})
     add_dependencies(voxel_engine_intrinsic_portal_lab
         voxel_intrinsic_portal_lab_shaders)
@@ -603,7 +606,7 @@ endif()
 
 if(VOXEL_BUILD_GLOBAL_METRIC_LAB)
     add_voxel_shader_set(voxel_global_metric_lab_shaders
-        shaders-global-metric-lab 512 256 0 0 0 0 1 1 1)
+        shaders-global-metric-lab 512 256 0 0 0 0 1 1 1 0)
     set(VOXEL_GLOBAL_SPATIAL_AA_SHADER
         "${CMAKE_CURRENT_BINARY_DIR}/shaders-global-metric-lab/planet_spatial_aa.comp.spv")
     set(VOXEL_GLOBAL_SPATIAL_AA_RESOLVE_SHADER
@@ -702,6 +705,57 @@ if(VOXEL_BUILD_GLOBAL_METRIC_LAB)
             /W4 /permissive- /EHsc)
     else()
         target_compile_options(voxel_engine_global_metric_lab PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wshadow
+            -Wno-missing-field-initializers)
+    endif()
+endif()
+
+if(VOXEL_BUILD_EIGHT_PLANET_SYSTEM_LAB)
+    add_voxel_shader_set(voxel_eight_planet_system_lab_shaders
+        shaders-eight-planet-system-lab 512 256 0 0 0 0 0 0 0 1)
+    add_executable(voxel_engine_eight_planet_system_lab ${VOXEL_ENGINE_SOURCES})
+    add_dependencies(voxel_engine_eight_planet_system_lab
+        voxel_eight_planet_system_lab_shaders)
+    target_include_directories(voxel_engine_eight_planet_system_lab PRIVATE src)
+    if(MINGW)
+        target_include_directories(voxel_engine_eight_planet_system_lab PRIVATE
+            "${VULKAN_HEADER_DIR}")
+    endif()
+    target_link_libraries(voxel_engine_eight_planet_system_lab PRIVATE
+        ${VOXEL_VULKAN_TARGET} ${VOXEL_SDL_TARGET} ${VOXEL_OPENAL_TARGET}
+        voxel_imgui Threads::Threads)
+    if(WIN32)
+        target_link_libraries(voxel_engine_eight_planet_system_lab PRIVATE psapi)
+    endif()
+    if(VOXEL_ENABLE_JOLT)
+        target_link_libraries(voxel_engine_eight_planet_system_lab PRIVATE Jolt)
+        target_compile_definitions(voxel_engine_eight_planet_system_lab PRIVATE
+            VOXEL_HAS_JOLT=1)
+    endif()
+    target_compile_definitions(voxel_engine_eight_planet_system_lab PRIVATE
+        SDL_MAIN_HANDLED
+        VOXEL_SHADER_DIR="${CMAKE_CURRENT_BINARY_DIR}/shaders-eight-planet-system-lab"
+        VOXEL_GEODESIC_FREQUENCY=512
+        VOXEL_TILE_RADIAL_LAYERS=32
+        VOXEL_RESIDENT_GEODESIC_PAGES=8192
+        VOXEL_ENABLE_REFERENCE_TRAVERSAL=0
+        VOXEL_TILE_LOOKUP_WIDTH=512
+        VOXEL_TILE_LOOKUP_HEIGHT=256
+        VOXEL_SCALE_LAB=0
+        VOXEL_ADAPTIVE_SDF_LAB=0
+        VOXEL_FRACTAL_PLANET_SDF_LAB=0
+        VOXEL_FRACTAL_VOXEL_SDF_LAB=0
+        VOXEL_PORTAL_LAB=0
+        VOXEL_INTRINSIC_PORTAL_LAB=0
+        VOXEL_GLOBAL_METRIC_LAB=0
+        VOXEL_EIGHT_PLANET_SYSTEM_LAB=1
+        VOXEL_DEFAULT_PLANET_RADIUS=1.0F
+        $<$<BOOL:${VOXEL_ENABLE_VALIDATION}>:VOXEL_ENABLE_VALIDATION=1>)
+    if(MSVC)
+        target_compile_options(voxel_engine_eight_planet_system_lab PRIVATE
+            /W4 /permissive- /EHsc)
+    else()
+        target_compile_options(voxel_engine_eight_planet_system_lab PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wshadow
             -Wno-missing-field-initializers)
     endif()
@@ -822,6 +876,15 @@ if(WIN32)
                 VERBATIM)
         endforeach()
     endif()
+    if(VOXEL_BUILD_EIGHT_PLANET_SYSTEM_LAB)
+        foreach(runtime_target IN ITEMS ${VOXEL_SDL_TARGET} ${VOXEL_OPENAL_TARGET})
+            add_custom_command(TARGET voxel_engine_eight_planet_system_lab POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_FILE:${runtime_target}>
+                    $<TARGET_FILE_DIR:voxel_engine_eight_planet_system_lab>
+                VERBATIM)
+        endforeach()
+    endif()
 endif()
 
 if(BUILD_TESTING)
@@ -838,6 +901,14 @@ if(BUILD_TESTING)
     add_test(NAME global_metric_field_invariants COMMAND global_metric_field_test)
     set_tests_properties(global_metric_field_invariants PROPERTIES
         LABELS "global-metric;cpu;null;geodesic;atlas;continuity;oracle")
+
+    add_executable(eight_planet_system_test
+        tests/eight_planet_system_test.cpp
+        src/planet/geodesic_topology.cpp)
+    target_include_directories(eight_planet_system_test PRIVATE src)
+    add_test(NAME eight_planet_system_invariants COMMAND eight_planet_system_test)
+    set_tests_properties(eight_planet_system_invariants PROPERTIES
+        LABELS "eight-planet-system;cpu;hex-lod;wormhole;finite-star;isolation")
 
     add_executable(portal_lab_test tests/portal_lab_test.cpp)
     target_include_directories(portal_lab_test PRIVATE src)
@@ -900,18 +971,33 @@ if(BUILD_TESTING)
     endif()
     if(VOXEL_BUILD_GLOBAL_METRIC_LAB)
         add_test(NAME global_metric_lab_gpu_smoke
-                 COMMAND voxel_engine_global_metric_lab --smoke-test)
+                 COMMAND voxel_engine_global_metric_lab --smoke-test
+                         --headless-capture
+                         "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/global-smoke.png"
+                         --capture-frames 3)
         add_test(NAME global_metric_lab_gpu_benchmark
-                 COMMAND voxel_engine_global_metric_lab --benchmark)
+                 COMMAND voxel_engine_global_metric_lab --benchmark
+                         --headless-capture
+                         "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/global-benchmark.png"
+                         --capture-frames 120)
         add_test(NAME global_metric_lab_gpu_traversal
                  COMMAND voxel_engine_global_metric_lab
-                         --intrinsic-traversal-regression)
+                         --intrinsic-traversal-regression
+                         --headless-capture
+                         "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/global-traversal.png"
+                         --capture-frames 160)
         add_test(NAME global_metric_lab_visual_media
                  COMMAND voxel_engine_global_metric_lab
-                         --global-visual-regression)
+                         --global-visual-regression
+                         --headless-capture
+                         "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/global-media.png"
+                         --capture-frames 180)
         add_test(NAME global_metric_lab_visual_no_media
                  COMMAND voxel_engine_global_metric_lab
-                         --global-visual-regression-no-media)
+                         --global-visual-regression-no-media
+                         --headless-capture
+                         "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/global-no-media.png"
+                         --capture-frames 180)
         set_tests_properties(global_metric_lab_gpu_smoke
             global_metric_lab_gpu_benchmark global_metric_lab_gpu_traversal
             global_metric_lab_visual_media global_metric_lab_visual_no_media
@@ -921,6 +1007,58 @@ if(BUILD_TESTING)
             global_metric_lab_visual_no_media PROPERTIES
             LABELS "global-metric;gpu;vulkan;geodesic;isolation;artifact;image;media"
             TIMEOUT 240 RESOURCE_LOCK voxel_gpu)
+    endif()
+    if(VOXEL_BUILD_EIGHT_PLANET_SYSTEM_LAB)
+        foreach(capture_preset IN ITEMS overview near mixed-lod)
+            add_test(NAME eight_planet_system_${capture_preset}
+                COMMAND voxel_engine_eight_planet_system_lab
+                    --headless-capture
+                    "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-${capture_preset}.png"
+                    --capture-frames 12 --system-capture ${capture_preset})
+            set_tests_properties(eight_planet_system_${capture_preset} PROPERTIES
+                LABELS "eight-planet-system;gpu;vulkan;hidden;isolation"
+                TIMEOUT 120 RESOURCE_LOCK voxel_gpu)
+        endforeach()
+        add_test(NAME eight_planet_system_traversal-8-1
+            COMMAND voxel_engine_eight_planet_system_lab
+                --headless-capture
+                "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-traversal-8-1.png"
+                --capture-frames 96 --system-capture traversal-8-1)
+        set_tests_properties(eight_planet_system_traversal-8-1 PROPERTIES
+            LABELS "eight-planet-system;gpu;vulkan;wormhole;media;moving-frame;hidden;isolation"
+            TIMEOUT 180 RESOURCE_LOCK voxel_gpu)
+        add_test(NAME eight_planet_system_edit_persistence
+            COMMAND voxel_engine_eight_planet_system_lab
+                --headless-capture
+                "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-edit-persistence.png"
+                --capture-frames 48 --system-capture edit-persistence)
+        set_tests_properties(eight_planet_system_edit_persistence PROPERTIES
+            LABELS "eight-planet-system;gpu;vulkan;edits;eviction;collision;hidden;isolation"
+            TIMEOUT 180 RESOURCE_LOCK voxel_gpu)
+        add_test(NAME eight_planet_system_finest_differential
+            COMMAND voxel_engine_eight_planet_system_lab
+                --headless-capture
+                "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-differential.png"
+                --capture-frames 6 --system-capture differential)
+        set_tests_properties(eight_planet_system_finest_differential PROPERTIES
+            LABELS "eight-planet-system;gpu;vulkan;differential;seams;pentagons;wormhole;hidden;isolation"
+            TIMEOUT 180 RESOURCE_LOCK voxel_gpu)
+        add_test(NAME eight_planet_system_benchmark
+            COMMAND voxel_engine_eight_planet_system_lab --benchmark
+                --headless-capture
+                "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-benchmark.png"
+                --capture-frames 120 --system-capture overview)
+        set_tests_properties(eight_planet_system_benchmark PROPERTIES
+            LABELS "eight-planet-system;gpu;vulkan;performance;hidden;isolation"
+            TIMEOUT 180 RESOURCE_LOCK voxel_gpu)
+        add_test(NAME eight_planet_system_cycle_audit
+            COMMAND voxel_engine_eight_planet_system_lab
+                --headless-capture
+                "${CMAKE_CURRENT_BINARY_DIR}/test-artifacts/system-cycle-audit.png"
+                --capture-frames 12 --system-capture cycle-audit)
+        set_tests_properties(eight_planet_system_cycle_audit PROPERTIES
+            LABELS "eight-planet-system;gpu;vulkan;wormhole;all-endpoints;hidden;isolation"
+            TIMEOUT 120 RESOURCE_LOCK voxel_gpu)
     endif()
     if(VOXEL_BUILD_ADAPTIVE_SDF_LAB)
         add_test(NAME adaptive_sdf_gpu_orbit

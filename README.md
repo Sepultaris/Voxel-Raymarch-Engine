@@ -1,6 +1,15 @@
 # Voxel Raymarch Engine
 
+SPDX-License-Identifier: GPL-3.0-or-later
+
 A GPU-driven planetary voxel engine prototype built with C++20, Vulkan, GLSL, SDL, Dear ImGui, OpenAL, and Jolt Physics. The target is a sparse planet-scale world whose local voxels support falling-sand cellular automata behavior.
+
+## License
+
+This project is free software licensed under the GNU General Public License,
+version 3 or (at your option) any later version. See [LICENSE](LICENSE) for the
+complete license text. Dependencies retain their own licenses; see their
+upstream distributions and any applicable notices for details.
 
 ## Current milestone
 
@@ -236,6 +245,21 @@ No coarse square surface is rendered. F6 collision evaluates the same finest
 local field, while edited macro columns override it. This finite ten-level lab
 does not replace production; see
 [docs/FRACTAL_PLANET_SDF_LAB.md](docs/FRACTAL_PLANET_SDF_LAB.md).
+
+### Eight-planet geodesic LOD system lab
+
+Phase two is available only through the standalone, unpromoted
+`voxel_engine_eight_planet_system_lab` target. It shares one immutable f512
+topology across eight independent sparse terrain/edit/media authorities and
+uploads a shared f1…f256 spherical hex/pent hierarchy for conservative GPU LOD;
+f512 convex-prism hits remain authoritative at one pixel and above. Automated
+runs are hidden-only and include overview, close, mixed LOD, edit persistence,
+moving 1→…→8→1 media traversal, finest differential, and sixteen-mouth audit
+captures. The stable executable and global-metric lab compile with the system
+macro disabled. See
+[`docs/EIGHT_PLANET_HEX_LOD_WORMHOLE_SYSTEM_LAB.md`](docs/EIGHT_PLANET_HEX_LOD_WORMHOLE_SYSTEM_LAB.md)
+for data layouts, memory/timing evidence, commands, gates, and explicit
+non-promotion boundaries.
 
 ## Configure and build
 

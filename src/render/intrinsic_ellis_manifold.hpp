@@ -64,7 +64,7 @@ struct IntrinsicEllisSettings {
     // mouth remap remains available only for regression/comparison because its
     // tangent aperture is a real binary policy boundary, not a smooth metric
     // chart transition.
-    bool globalNativeEllisPath{true};
+    bool globalNativeEllisPath{false};
     float throatRadius{kPortalGrThroatRatio};
     float contentExitProperDepth{
         std::sqrt(1.0F - kPortalGrThroatRatio * kPortalGrThroatRatio)};
@@ -83,8 +83,13 @@ struct IntrinsicEllisSettings {
     float mouseSensitivity{0.0035F};
     // Isolated global-handle lab parameters/state.  These are ignored by the
     // intrinsic comparison lab and f512 production.
-    float globalHandleTailScale{1.75F};
+    float globalHandleTailScale{0.85F};
     float globalHandleMetricStrength{0.72F};
+    // Collar-to-collar intrinsic proper distance measured in throat
+    // diameters. 2.00 is the accepted very-short lab default: 0.32 remains
+    // available only as the ultra-short, surface-like comparison. The
+    // historical geometry was about 5.8 diameters at the default mouth.
+    float globalHandleLengthDiameters{2.00F};
     // Global-lab-only deterministic geodesic-Jacobian spatial AA.  The
     // center ray is the classifier; only rapid-distortion/silhouette pixels
     // evaluate the rotated four-sample coverage pattern.
@@ -98,6 +103,16 @@ struct IntrinsicEllisSettings {
     std::uint32_t globalLastMouth{2U};
     std::uint32_t globalCrossings{};
     float globalAffineDistance{};
+    // Same-exterior atlas observer state. Chart 0 is the shared exterior;
+    // chart 1 is the smooth Ellis-like handle collar/core.
+    std::uint32_t globalHandleChart{};
+    float globalHandleU{};
+    PortalVector globalHandleN{0.0F, 0.0F, 1.0F};
+    // Despite the legacy field names, global-handle packets use the
+    // basis-free embedded tangent representation. Native Ellis comparison
+    // mode retains the older radial/e1/e2 local representation.
+    PortalVector globalHandleForwardLocal{0.0F, 0.0F, -1.0F};
+    PortalVector globalHandleUpLocal{0.0F, 1.0F, 0.0F};
     std::uint32_t integrationQuality{1U};
     std::uint32_t debugMode{};
     EllisState cameraState{};
@@ -234,6 +249,26 @@ struct IntrinsicEllisContentPose {
     const auto basis = ellisAngularBasis(angularPosition);
     return {tangent.radial, portalDot(tangent.angular, basis[0]),
             portalDot(tangent.angular, basis[1])};
+}
+
+// Basis-free orthonormal representation of a tangent at n. Unlike
+// ellisTangentToLocal(), this encoding has no least-aligned-axis branch, so a
+// transported camera frame remains continuous while n crosses one of the
+// angular-basis selection surfaces. Radial and angular components are both
+// physical orthonormal components of the Ellis metric, making this embedding
+// an isometry at a fixed n.
+[[nodiscard]] inline PortalVector ellisTangentToEmbedded(
+    const EllisTangent& tangent, PortalVector angularPosition) noexcept {
+    const PortalVector n = portalNormalize(angularPosition);
+    const EllisTangent projected = ellisProjectTangent(tangent, n);
+    return n * projected.radial + projected.angular;
+}
+
+[[nodiscard]] inline EllisTangent ellisTangentFromEmbedded(
+    PortalVector embedded, PortalVector angularPosition) noexcept {
+    const PortalVector n = portalNormalize(angularPosition);
+    const float radial = portalDot(embedded, n);
+    return ellisProjectTangent({radial, embedded - n * radial}, n);
 }
 
 [[nodiscard]] inline PortalVector intrinsicEllisTangentToContent(
@@ -392,10 +427,13 @@ struct EllisDerivative {
                                      transported.angular);
     return {
         expansion * coupling,
-        transported.angular *
-            (-expansion * path.velocity.radial) -
+        // transported.angular is expressed in the physical orthonormal
+        // sphere basis. That basis is parallel along e_l, so there is no
+        // additional -(R'/R) ldot W_angular term. Keeping it here made the
+        // native reference and same-exterior camera transport disagree and
+        // caused norm/roll drift in both comparison paths.
         path.velocity.angular *
-            (expansion * transported.radial) -
+            (-expansion * transported.radial) -
         path.angularPosition * (coupling / radius)};
 }
 
@@ -500,8 +538,11 @@ inline void ellisIntegrateGeodesic(EllisState& state, EllisFrame& frame,
 struct alignas(16) IntrinsicEllisGpuParameters {
     std::array<float, 4> camera{};       // l, throat a, exit |l|, enabled
     std::array<float, 4> angular{};      // n.xyz, content sphere radius
-    std::array<float, 4> forward{};      // radial, local tangent x/y, quality
-    std::array<float, 4> up{};           // radial, local tangent x/y, debug
+    // Native Ellis uses radial/e1/e2 here. Same-exterior handle mode uses a
+    // basis-free embedded tangent so camera packets cannot jump at an angular
+    // chart reference-axis change.
+    std::array<float, 4> forward{};
+    std::array<float, 4> up{};
     std::array<float, 4> endpointA{};    // normalized engine world, unused w
     std::array<float, 4> endpointB{};    // normalized engine world, unused w
     std::array<float, 4> endBRotation{}; // yaw, pitch, roll, frame handedness
@@ -535,22 +576,34 @@ static_assert(sizeof(IntrinsicEllisGpuBuffer) == sizeof(PortalLabGpuBuffer));
             settings.globalForward, {0.0F, 0.0F, -1.0F});
         const PortalVector globalUp = portalOrthonormalUp(
             globalForward, settings.globalUp);
-        result.camera = {settings.globalPosition.x, settings.globalPosition.y,
-                         settings.globalPosition.z, settings.enabled ? 1.0F : 0.0F};
+        const bool insideHandle = settings.globalHandleChart == 1U;
+        const PortalVector cameraPacket = insideHandle
+            ? settings.globalHandleN : settings.globalPosition;
+        const PortalVector forwardPacket = insideHandle
+            ? portalNormalize(settings.globalHandleForwardLocal)
+            : globalForward;
+        const PortalVector upPacket = insideHandle
+            ? portalNormalize(settings.globalHandleUpLocal)
+            : globalUp;
+        result.camera = {cameraPacket.x, cameraPacket.y, cameraPacket.z,
+                         insideHandle ? settings.globalHandleU : 0.0F};
         // In the global lab the content standoff is already carried in
         // endpointA.w.  Reuse this otherwise-dead lane for the AA distortion
         // threshold without growing the fixed 128-byte parameter block.
-        result.angular = {globalForward.x, globalForward.y, globalForward.z,
+        result.angular = {forwardPacket.x, forwardPacket.y, forwardPacket.z,
                           settings.globalSpatialAaDistortionThreshold};
-        result.forward = {globalUp.x, globalUp.y, globalUp.z,
+        result.forward = {upPacket.x, upPacket.y, upPacket.z,
                           static_cast<float>(settings.integrationQuality)};
-        result.up = {settings.globalVelocity.x, settings.globalVelocity.y,
-                     settings.globalVelocity.z,
+        // GPU ray initialization does not consume the observer velocity.
+        // Reuse the third lane for the intrinsic collar-to-collar proper
+        // length ratio without growing the fixed 128-byte parameter block.
+        result.up = {settings.globalHandleTailScale, settings.globalVelocity.y,
+                     settings.globalHandleLengthDiameters,
                      static_cast<float>(settings.debugMode)};
         result.endpointA = {endpointA.x, endpointA.y, endpointA.z,
                             settings.globalSpatialAaEnabled ? 1.0F : 0.0F};
         result.endpointB = {endpointB.x, endpointB.y, endpointB.z,
-                            settings.throatRadius};
+                            settings.contentSphereRadius};
         result.endBRotation = {settings.endBYaw, settings.endBPitch,
                                settings.endBRoll,
                                settings.globalSpatialAaMagnificationThreshold};
@@ -558,9 +611,9 @@ static_assert(sizeof(IntrinsicEllisGpuBuffer) == sizeof(PortalLabGpuBuffer));
         // accumulated affine distance.  They make the first GPU ray after a
         // body crossing begin from exactly the same event-split state rather
         // than silently reverting to an ownerless/zero-affine wrapper.
-        result.control = {static_cast<float>(settings.globalLastMouth),
-                          settings.globalAffineDistance,
-                          settings.globalHandleTailScale,
+        result.control = {-2.0F,
+                          static_cast<float>(settings.globalHandleChart),
+                          settings.throatRadius,
                           settings.globalHandleMetricStrength};
         return result;
     }

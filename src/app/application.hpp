@@ -9,6 +9,7 @@
 
 #include <memory>
 #include <cstdint>
+#include <filesystem>
 
 struct SDL_Window;
 
@@ -18,7 +19,8 @@ class VulkanRenderer;
 
 class Application final {
 public:
-    explicit Application(bool forceTopologyRegeneration = false);
+    explicit Application(bool forceTopologyRegeneration = false,
+                         bool headlessCapture = false);
     ~Application();
 
     Application(const Application&) = delete;
@@ -36,6 +38,10 @@ public:
         renderSettings_.intrinsicEllis.globalSpatialAaEnabled = enabled;
         syncIntrinsicEllisRenderSettings();
     }
+    void setGlobalNoHandleReference(bool enabled) noexcept {
+        renderSettings_.intrinsicEllis.debugMode = enabled ? 12U : 0U;
+        syncIntrinsicEllisRenderSettings();
+    }
     void beginAdaptiveSdfInspection() {
         setCameraMode(CameraControllerMode::SurfaceTraversal, false);
         surfaceCamera_.rotateLook(-0.18F);
@@ -48,6 +54,16 @@ public:
     }
     void beginIntrinsicEllisTraversalRegression() noexcept;
     void beginGlobalMetricVisualRegression(bool mediaEnabled) noexcept;
+    void setGlobalLensCapturePreset(std::uint32_t preset) noexcept;
+    void setGlobalCaptureTailScale(float tailScale) noexcept;
+    void setGlobalCaptureCameraPreset(std::uint32_t preset) noexcept;
+    void setGlobalCaptureDebugMode(std::uint32_t mode) noexcept;
+    void setEightPlanetCapturePreset(std::uint32_t preset) noexcept {
+        renderSettings_.visualizationMode = 101U + (preset < 7U ? preset : 6U);
+    }
+    [[nodiscard]] bool captureFrame(const std::filesystem::path& outputPath,
+                                    std::string& error);
+    [[nodiscard]] bool headlessWindowStayedHidden() const noexcept;
 
 private:
     void buildDevelopmentUi(float deltaSeconds);
@@ -63,6 +79,7 @@ private:
     void syncIntrinsicEllisRenderSettings() noexcept;
 
     SDL_Window* window_{};
+    bool headlessCapture_{};
     std::unique_ptr<VulkanRenderer> renderer_;
     AudioEngine audio_;
     PhysicsEngine physics_;
